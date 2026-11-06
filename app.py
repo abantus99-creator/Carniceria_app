@@ -273,7 +273,7 @@ elif menu == "💰 Vender":
                     st.session_state.carrito = []
                     st.rerun()
 
-# ---------- COMPRAR (con sugerencia de precio de venta +30%) ----------
+# ---------- COMPRAR ----------
 elif menu == "📥 Comprar":
     st.header("📥 Registrar Compra de Mercadería (varios productos)")
 
@@ -299,13 +299,14 @@ elif menu == "📥 Comprar":
             cantidad = st.number_input("2. Cantidad que entra (kg)", min_value=0.1, step=0.5, value=5.0, key="compra_cant")
             precio_compra = st.number_input("3. Precio de compra ($/kg)", min_value=0, step=50, value=0, key="compra_precio")
 
-            # Sugerencia automática de precio de venta (margen 30%)
+            # Mostrar precio de venta sugerido
             if precio_compra > 0:
                 precio_venta_sugerido = round(precio_compra * 1.30)
-                st.info(f"💡 **Precio de venta sugerido (margen 30%):** ${precio_venta_sugerido:,.0f} / kg")
+                st.success(f"💡 Precio de venta se actualizará automáticamente a: **${precio_venta_sugerido:,.0f} / kg** (margen 30%)")
 
             if st.button("➕ AGREGAR AL CARRITO DE COMPRA", use_container_width=True):
                 p = opciones[seleccion]
+                precio_venta = round(precio_compra * 1.30) if precio_compra > 0 else p["precio"]
 
                 encontrado = False
                 for item in st.session_state.carrito_compra:
@@ -313,7 +314,7 @@ elif menu == "📥 Comprar":
                         item["cantidad"] += cantidad
                         item["precio"] = precio_compra
                         item["subtotal"] = item["cantidad"] * precio_compra
-                        item["precio_venta_sugerido"] = round(precio_compra * 1.30)
+                        item["precio_venta"] = precio_venta
                         encontrado = True
                         break
 
@@ -325,7 +326,7 @@ elif menu == "📥 Comprar":
                         "cantidad": cantidad,
                         "precio": precio_compra,
                         "subtotal": cantidad * precio_compra,
-                        "precio_venta_sugerido": round(precio_compra * 1.30) if precio_compra > 0 else 0
+                        "precio_venta": precio_venta
                     })
 
                 st.success(f"Agregado: {cantidad:.1f} kg de {p['nombre']}")
@@ -342,8 +343,7 @@ elif menu == "📥 Comprar":
                 for i, item in enumerate(st.session_state.carrito_compra):
                     st.markdown(f"**{item['nombre']}**")
                     st.write(f"{item['cantidad']:.2f} kg × ${item['precio']:,.0f} = **${item['subtotal']:,.0f}**")
-                    if item.get("precio_venta_sugerido", 0) > 0:
-                        st.caption(f"💡 Venta sugerida: ${item['precio_venta_sugerido']:,.0f}/kg")
+                    st.caption(f"→ Nuevo precio de venta: ${item['precio_venta']:,.0f}/kg")
 
                     if st.button("❌ Quitar", key=f"quitar_compra_{i}"):
                         st.session_state.carrito_compra.pop(i)
@@ -368,16 +368,15 @@ elif menu == "📥 Comprar":
                             "INSERT INTO compras (producto_id, cantidad, precio, fecha) VALUES (?,?,?,?)",
                             (item["id"], item["cantidad"], item["precio"], fecha)
                         )
-                        # Actualizar precio de venta con el margen del 30% (opcional)
-                        if item.get("precio_venta_sugerido", 0) > 0:
-                            conn.execute(
-                                "UPDATE productos SET precio = ? WHERE id = ?",
-                                (item["precio_venta_sugerido"], item["id"])
-                            )
+                        # Actualizar precio de venta automáticamente (margen 30%)
+                        conn.execute(
+                            "UPDATE productos SET precio = ? WHERE id = ?",
+                            (item["precio_venta"], item["id"])
+                        )
 
                     conn.commit()
                     st.session_state.carrito_compra = []
-                    st.success(f"✅ Compra registrada por ${total_compra:,.0f}")
+                    st.success(f"✅ Compra registrada por ${total_compra:,.0f}\nPrecios de venta actualizados con margen del 30%")
                     st.rerun()
 
                 if st.button("🗑️ Vaciar carrito", use_container_width=True):
@@ -425,29 +424,11 @@ elif menu == "📋 Pedidos y Predicción":
         total_sugerido = df_ventas["sugerido_compra"].sum()
         st.metric("Total kilos sugeridos a comprar", f"{total_sugerido:.1f} kg")
 
-        necesita = df_ventas[df_ventas["sugerido_compra"] > 0]
-        if not necesita.empty:
-            st.subheader("⚠️ Productos que sí conviene comprar")
-            st.dataframe(
-                necesita[["categoria", "nombre", "stock", "sugerido_compra"]]
-                .rename(columns={
-                    "categoria": "Categoría",
-                    "nombre": "Producto",
-                    "stock": "Stock actual",
-                    "sugerido_compra": "Comprar (kg)"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-
-# ---------- SUGERENCIAS DE PRECIOS ----------
+# ---------- SUGERENCIAS DE PRECIOS (con botones para aplicar) ----------
 elif menu == "💡 Sugerencias de Precios":
-    st.header("💡 Sugerencias de Precios para no perder mercadería")
+    st.header("💡 Sugerencias de Precios")
 
-    st.write("""
-    Esta sección analiza el stock actual y la velocidad de ventas de los últimos 90 días  
-    y te recomienda ajustes de precio para mover más rápido la mercadería.
-    """)
+    st.write("Analiza stock y velocidad de ventas. Puedes aplicar el precio sugerido con un botón.")
 
     df = pd.read_sql_query("""
         SELECT 
@@ -468,74 +449,51 @@ elif menu == "💡 Sugerencias de Precios":
     if df.empty:
         st.info("No hay datos suficientes")
     else:
-        df["promedio_diario"] = df["vendido_90d"] / 90
-        df["dias_de_stock"] = df.apply(
-            lambda x: round(x["stock"] / x["promedio_diario"], 1) if x["promedio_diario"] > 0 else 999, axis=1
-        )
-
-        sugerencias = []
-
         for _, row in df.iterrows():
             precio_actual = row["precio_actual"]
-            dias = row["dias_de_stock"]
-            stock = row["stock"]
-            minimo = row["minimo"]
+            promedio_diario = row["vendido_90d"] / 90 if row["vendido_90d"] > 0 else 0
+            dias_stock = round(row["stock"] / promedio_diario, 1) if promedio_diario > 0 else 999
 
             # Lógica de sugerencia
-            if dias > 45 or stock > minimo * 3:
-                # Mucho stock o se vende muy lento → bajar precio
-                precio_sugerido = round(precio_actual * 0.90)   # -10%
-                accion = "Bajar precio (-10%) para acelerar salida"
-                prioridad = "Alta"
-            elif dias > 30:
-                precio_sugerido = round(precio_actual * 0.95)  # -5%
-                accion = "Bajar ligeramente (-5%)"
-                prioridad = "Media"
-            elif dias < 10 and stock <= minimo:
-                precio_sugerido = round(precio_actual * 1.05)  # +5%
-                accion = "Puedes subir un poco (+5%) - alta rotación"
-                prioridad = "Oportunidad"
+            if dias_stock > 45 or row["stock"] > row["minimo"] * 3:
+                precio_sugerido = round(precio_actual * 0.90)
+                accion = "Bajar -10% (mucho stock / baja rotación)"
+                color = "red"
+            elif dias_stock > 30:
+                precio_sugerido = round(precio_actual * 0.95)
+                accion = "Bajar -5%"
+                color = "orange"
+            elif dias_stock < 10 and row["stock"] <= row["minimo"]:
+                precio_sugerido = round(precio_actual * 1.05)
+                accion = "Subir +5% (alta rotación)"
+                color = "green"
             else:
                 precio_sugerido = precio_actual
-                accion = "Mantener precio actual"
-                prioridad = "Normal"
+                accion = "Mantener precio"
+                color = "gray"
 
-            sugerencias.append({
-                "Categoría": row["categoria"],
-                "Producto": row["nombre"],
-                "Stock": round(stock, 1),
-                "Días de stock": dias if dias < 999 else "Sin ventas",
-                "Precio actual": f"${precio_actual:,.0f}",
-                "Precio sugerido": f"${precio_sugerido:,.0f}",
-                "Acción": accion,
-                "Prioridad": prioridad
-            })
+            # Solo mostrar si hay cambio sugerido
+            if precio_sugerido != precio_actual:
+                with st.container():
+                    col1, col2, col3 = st.columns([3, 2, 1])
 
-        df_sug = pd.DataFrame(sugerencias)
+                    with col1:
+                        st.markdown(f"**{row['categoria']} - {row['nombre']}**")
+                        st.caption(f"Stock: {row['stock']:.1f} kg | Días de stock: {dias_stock if dias_stock < 999 else 'Sin ventas'}")
+                        st.write(f"Precio actual: **${precio_actual:,.0f}** → Sugerido: **${precio_sugerido:,.0f}**")
+                        st.caption(accion)
 
-        # Mostrar primero las prioritarias
-        st.subheader("🔴 Prioridad Alta (mucho stock o baja rotación)")
-        alta = df_sug[df_sug["Prioridad"] == "Alta"]
-        if not alta.empty:
-            st.dataframe(alta, use_container_width=True, hide_index=True)
-        else:
-            st.success("No hay productos con prioridad alta")
+                    with col3:
+                        if st.button("✅ Aplicar", key=f"aplicar_{row['id']}"):
+                            conn.execute(
+                                "UPDATE productos SET precio = ? WHERE id = ?",
+                                (precio_sugerido, row["id"])
+                            )
+                            conn.commit()
+                            st.success(f"Precio de {row['nombre']} actualizado a ${precio_sugerido:,.0f}")
+                            st.rerun()
 
-        st.subheader("🟡 Prioridad Media")
-        media = df_sug[df_sug["Prioridad"] == "Media"]
-        if not media.empty:
-            st.dataframe(media, use_container_width=True, hide_index=True)
-
-        st.subheader("🟢 Oportunidad de subir precio")
-        oportunidad = df_sug[df_sug["Prioridad"] == "Oportunidad"]
-        if not oportunidad.empty:
-            st.dataframe(oportunidad, use_container_width=True, hide_index=True)
-
-        st.subheader("⚪ Mantener precio")
-        normal = df_sug[df_sug["Prioridad"] == "Normal"]
-        if not normal.empty:
-            with st.expander("Ver productos que pueden mantener el precio"):
-                st.dataframe(normal, use_container_width=True, hide_index=True)
+                    st.markdown("---")
 
 # ---------- ANÁLISIS COMPLETO ----------
 elif menu == "📊 Análisis Completo":
