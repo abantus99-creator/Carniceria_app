@@ -447,3 +447,79 @@ elif menu == "📊 Análisis Completo":
         GROUP BY v.producto_id
         ORDER BY kilos DESC
         LIMIT 10
+    """, conn)
+
+    if not df_top.empty:
+        st.bar_chart(df_top.set_index("nombre"))
+    else:
+        st.info("Aún no hay ventas")
+
+    st.markdown("---")
+
+    st.subheader("📦 Ventas por Categoría")
+    df_cat = pd.read_sql_query("""
+        SELECT p.categoria, ROUND(SUM(v.cantidad),1) as kilos, ROUND(SUM(v.total),0) as total
+        FROM ventas v
+        JOIN productos p ON v.producto_id = p.id
+        GROUP BY p.categoria
+        ORDER BY total DESC
+    """, conn)
+
+    if not df_cat.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Kilos vendidos")
+            st.bar_chart(df_cat.set_index("categoria")["kilos"])
+        with col2:
+            st.write("Dinero ($)")
+            st.bar_chart(df_cat.set_index("categoria")["total"])
+
+    st.markdown("---")
+
+    st.subheader("🕒 Últimas 15 ventas")
+    df_ult = pd.read_sql_query("""
+        SELECT v.fecha, p.nombre, p.categoria, v.cantidad, v.total
+        FROM ventas v
+        JOIN productos p ON v.producto_id = p.id
+        ORDER BY v.fecha DESC LIMIT 15
+    """, conn)
+    if not df_ult.empty:
+        st.dataframe(df_ult, use_container_width=True, hide_index=True)
+
+# ---------- GENERAR QR ----------
+elif menu == "📱 Generar QR":
+    st.header("📱 Generar Código QR de Producto")
+
+    st.write("Genera un QR con el detalle del producto para entregárselo al cliente.")
+
+    productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
+    if productos:
+        opciones = {f"{p['categoria']} - {p['nombre']} (${p['precio']:,.0f}/kg)": p for p in productos}
+        seleccion = st.selectbox("Producto", list(opciones.keys()))
+        p = opciones[seleccion]
+
+        peso = st.number_input("Peso (kg)", min_value=0.1, step=0.1, value=1.0)
+        total = peso * p["precio"]
+
+        st.write(f"**Total a pagar:** ${total:,.0f}")
+
+        texto_qr = f"""CARNICERÍA
+Producto: {p['nombre']}
+Categoría: {p['categoria']}
+Peso: {peso:.2f} kg
+Precio: ${p['precio']:,.0f}/kg
+Total: ${total:,.0f}
+Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}"""
+
+        if st.button("📱 GENERAR QR", use_container_width=True):
+            img_buffer = generar_qr(texto_qr)
+            st.image(img_buffer, caption="Código QR del producto", width=300)
+            st.code(texto_qr)
+            st.download_button(
+                "⬇️ Descargar QR",
+                data=img_buffer,
+                file_name=f"qr_{p['nombre'].replace(' ', '_')}.png",
+                mime="image/png"
+            )
+
+conn.close()
