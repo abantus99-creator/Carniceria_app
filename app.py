@@ -182,7 +182,7 @@ elif menu == "📦 Productos":
             st.success("Eliminado")
             st.rerun()
 
-# ---------- VENDER (con carrito de varios productos) ----------
+# ---------- VENDER ----------
 elif menu == "💰 Vender":
     st.header("💰 Registrar Venta (varios productos)")
 
@@ -204,8 +204,8 @@ elif menu == "💰 Vender":
                 for p in productos
             }
 
-            seleccion = st.selectbox("Producto", list(opciones.keys()))
-            cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.1, value=1.0)
+            seleccion = st.selectbox("Producto", list(opciones.keys()), key="venta_prod")
+            cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.1, value=1.0, key="venta_cant")
 
             if st.button("➕ AGREGAR AL CARRITO", use_container_width=True):
                 p = opciones[seleccion]
@@ -234,7 +234,7 @@ elif menu == "💰 Vender":
                     st.rerun()
 
         with col2:
-            st.subheader("🛒 Carrito")
+            st.subheader("🛒 Carrito de Venta")
 
             if not st.session_state.carrito:
                 st.info("El carrito está vacío")
@@ -244,7 +244,7 @@ elif menu == "💰 Vender":
                     st.markdown(f"**{item['nombre']}**")
                     st.write(f"{item['cantidad']:.2f} kg × ${item['precio']:,.0f} = **${item['subtotal']:,.0f}**")
                     
-                    if st.button("❌ Quitar", key=f"quitar_{i}"):
+                    if st.button("❌ Quitar", key=f"quitar_venta_{i}"):
                         st.session_state.carrito.pop(i)
                         st.rerun()
                     st.markdown("---")
@@ -274,26 +274,97 @@ elif menu == "💰 Vender":
 
 # ---------- COMPRAR ----------
 elif menu == "📥 Comprar":
-    st.header("📥 Registrar Compra")
+    st.header("📥 Registrar Compra de Mercadería (varios productos)")
+
+    if "carrito_compra" not in st.session_state:
+        st.session_state.carrito_compra = []
 
     productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
-    if productos:
-        opciones = {f"{p['categoria']} - {p['nombre']}": p["id"] for p in productos}
-        producto = st.selectbox("Producto", list(opciones.keys()))
-        cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.5, value=5.0)
-        precio = st.number_input("Precio compra $/kg", min_value=0, step=100)
 
-        if st.button("✅ REGISTRAR COMPRA", use_container_width=True):
-            pid = opciones[producto]
-            fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-            conn.execute("UPDATE productos SET stock = stock + ? WHERE id = ?", (cantidad, pid))
-            conn.execute(
-                "INSERT INTO compras (producto_id, cantidad, precio, fecha) VALUES (?,?,?,?)",
-                (pid, cantidad, precio, fecha)
-            )
-            conn.commit()
-            st.success(f"Compra registrada: +{cantidad:.1f} kg")
-            st.rerun()
+    if not productos:
+        st.warning("No hay productos registrados")
+    else:
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.subheader("Agregar productos a la compra")
+
+            opciones = {
+                f"{p['categoria']} | {p['nombre']} | Stock actual: {p['stock']:.1f} kg": p
+                for p in productos
+            }
+
+            seleccion = st.selectbox("1. Selecciona el producto", list(opciones.keys()), key="compra_prod")
+            cantidad = st.number_input("2. Cantidad que entra (kg)", min_value=0.1, step=0.5, value=5.0, key="compra_cant")
+            precio = st.number_input("3. Precio de compra ($/kg)", min_value=0, step=100, value=0, key="compra_precio")
+
+            if st.button("➕ AGREGAR AL CARRITO DE COMPRA", use_container_width=True):
+                p = opciones[seleccion]
+
+                encontrado = False
+                for item in st.session_state.carrito_compra:
+                    if item["id"] == p["id"]:
+                        item["cantidad"] += cantidad
+                        item["precio"] = precio
+                        item["subtotal"] = item["cantidad"] * precio
+                        encontrado = True
+                        break
+
+                if not encontrado:
+                    st.session_state.carrito_compra.append({
+                        "id": p["id"],
+                        "nombre": p["nombre"],
+                        "categoria": p["categoria"],
+                        "cantidad": cantidad,
+                        "precio": precio,
+                        "subtotal": cantidad * precio
+                    })
+
+                st.success(f"Agregado: {cantidad:.1f} kg de {p['nombre']}")
+                st.rerun()
+
+        with col2:
+            st.subheader("🛒 Carrito de Compra")
+
+            if not st.session_state.carrito_compra:
+                st.info("El carrito está vacío")
+            else:
+                total_compra = 0
+
+                for i, item in enumerate(st.session_state.carrito_compra):
+                    st.markdown(f"**{item['nombre']}**")
+                    st.write(f"{item['cantidad']:.2f} kg × ${item['precio']:,.0f} = **${item['subtotal']:,.0f}**")
+
+                    if st.button("❌ Quitar", key=f"quitar_compra_{i}"):
+                        st.session_state.carrito_compra.pop(i)
+                        st.rerun()
+
+                    st.markdown("---")
+                    total_compra += item["subtotal"]
+
+                st.markdown(f"### TOTAL COMPRA: ${total_compra:,.0f}")
+
+                if st.button("✅ FINALIZAR COMPRA", use_container_width=True, type="primary"):
+                    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                    for item in st.session_state.carrito_compra:
+                        conn.execute(
+                            "UPDATE productos SET stock = stock + ? WHERE id = ?",
+                            (item["cantidad"], item["id"])
+                        )
+                        conn.execute(
+                            "INSERT INTO compras (producto_id, cantidad, precio, fecha) VALUES (?,?,?,?)",
+                            (item["id"], item["cantidad"], item["precio"], fecha)
+                        )
+
+                    conn.commit()
+                    st.session_state.carrito_compra = []
+                    st.success(f"✅ Compra registrada por ${total_compra:,.0f}")
+                    st.rerun()
+
+                if st.button("🗑️ Vaciar carrito", use_container_width=True):
+                    st.session_state.carrito_compra = []
+                    st.rerun()
 
 # ---------- PEDIDOS Y PREDICCIÓN ----------
 elif menu == "📋 Pedidos y Predicción":
@@ -376,79 +447,3 @@ elif menu == "📊 Análisis Completo":
         GROUP BY v.producto_id
         ORDER BY kilos DESC
         LIMIT 10
-    """, conn)
-
-    if not df_top.empty:
-        st.bar_chart(df_top.set_index("nombre"))
-    else:
-        st.info("Aún no hay ventas")
-
-    st.markdown("---")
-
-    st.subheader("📦 Ventas por Categoría")
-    df_cat = pd.read_sql_query("""
-        SELECT p.categoria, ROUND(SUM(v.cantidad),1) as kilos, ROUND(SUM(v.total),0) as total
-        FROM ventas v
-        JOIN productos p ON v.producto_id = p.id
-        GROUP BY p.categoria
-        ORDER BY total DESC
-    """, conn)
-
-    if not df_cat.empty:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Kilos vendidos")
-            st.bar_chart(df_cat.set_index("categoria")["kilos"])
-        with col2:
-            st.write("Dinero ($)")
-            st.bar_chart(df_cat.set_index("categoria")["total"])
-
-    st.markdown("---")
-
-    st.subheader("🕒 Últimas 15 ventas")
-    df_ult = pd.read_sql_query("""
-        SELECT v.fecha, p.nombre, p.categoria, v.cantidad, v.total
-        FROM ventas v
-        JOIN productos p ON v.producto_id = p.id
-        ORDER BY v.fecha DESC LIMIT 15
-    """, conn)
-    if not df_ult.empty:
-        st.dataframe(df_ult, use_container_width=True, hide_index=True)
-
-# ---------- GENERAR QR ----------
-elif menu == "📱 Generar QR":
-    st.header("📱 Generar Código QR de Producto")
-
-    st.write("Genera un QR con el detalle del producto para entregárselo al cliente.")
-
-    productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
-    if productos:
-        opciones = {f"{p['categoria']} - {p['nombre']} (${p['precio']:,.0f}/kg)": p for p in productos}
-        seleccion = st.selectbox("Producto", list(opciones.keys()))
-        p = opciones[seleccion]
-
-        peso = st.number_input("Peso (kg)", min_value=0.1, step=0.1, value=1.0)
-        total = peso * p["precio"]
-
-        st.write(f"**Total a pagar:** ${total:,.0f}")
-
-        texto_qr = f"""CARNICERÍA
-Producto: {p['nombre']}
-Categoría: {p['categoria']}
-Peso: {peso:.2f} kg
-Precio: ${p['precio']:,.0f}/kg
-Total: ${total:,.0f}
-Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}"""
-
-        if st.button("📱 GENERAR QR", use_container_width=True):
-            img_buffer = generar_qr(texto_qr)
-            st.image(img_buffer, caption="Código QR del producto", width=300)
-            st.code(texto_qr)
-            st.download_button(
-                "⬇️ Descargar QR",
-                data=img_buffer,
-                file_name=f"qr_{p['nombre'].replace(' ', '_')}.png",
-                mime="image/png"
-            )
-
-conn.close()
