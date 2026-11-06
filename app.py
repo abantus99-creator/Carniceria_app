@@ -2,9 +2,6 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime
-import qrcode
-from io import BytesIO
-import os
 
 # ==================== BASE DE DATOS ====================
 def get_db():
@@ -16,56 +13,33 @@ def init():
     conn = get_db()
     c = conn.cursor()
 
-    # --- Tablas ---
     c.execute("""CREATE TABLE IF NOT EXISTS productos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nombre TEXT, categoria TEXT, precio REAL, stock REAL, minimo REAL)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS ventas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, cantidad REAL, total REAL, fecha TEXT, cliente_id INTEGER)""")
+        producto_id INTEGER, cantidad REAL, total REAL, fecha TEXT)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS compras (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         producto_id INTEGER, cantidad REAL, precio REAL, fecha TEXT, proveedor_id INTEGER)""")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS mermas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, cantidad REAL, motivo TEXT, costo REAL, fecha TEXT)""")
-
     c.execute("""CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nombre TEXT, telefono TEXT, notas TEXT)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS clientes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT, telefono TEXT, saldo REAL DEFAULT 0)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS lotes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, nombre TEXT, cantidad REAL, lote TEXT, caducidad TEXT, fecha TEXT)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS cierres (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fecha TEXT, total REAL, kilos REAL, num INTEGER, notas TEXT)""")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS config (
-        clave TEXT PRIMARY KEY, valor TEXT)""")
+    # Arreglar columnas antiguas
+    try:
+        c.execute("ALTER TABLE compras ADD COLUMN proveedor_id INTEGER")
+    except Exception:
+        pass
 
-    # --- Arreglar columnas que faltan en bases antiguas ---
-    def add_column_if_missing(table, column, coltype):
-        try:
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-        except Exception:
-            pass  # Ya existe
-
-    add_column_if_missing("ventas", "cliente_id", "INTEGER")
-    add_column_if_missing("compras", "proveedor_id", "INTEGER")
-    add_column_if_missing("clientes", "saldo", "REAL DEFAULT 0")
-    add_column_if_missing("lotes", "caducidad", "TEXT")
-    add_column_if_missing("lotes", "lote", "TEXT")
-
-    # --- Datos iniciales ---
+    # Datos iniciales
     if c.execute("SELECT COUNT(*) FROM productos").fetchone()[0] == 0:
         datos = [
             ("Lomo Vetado", "Vacuno", 12990, 15, 5),
@@ -100,28 +74,6 @@ def init():
     conn.commit()
     conn.close()
 
-def generar_qr(texto):
-    qr = qrcode.QRCode(version=1, box_size=8, border=2)
-    qr.add_data(texto)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
-
-def get_meta():
-    conn = get_db()
-    row = conn.execute("SELECT valor FROM config WHERE clave='meta_dia'").fetchone()
-    conn.close()
-    return float(row["valor"]) if row else 0
-
-def set_meta(valor):
-    conn = get_db()
-    conn.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES ('meta_dia', ?)", (str(valor),))
-    conn.commit()
-    conn.close()
-
 # ==================== APP ====================
 st.set_page_config(page_title="Carnicería", page_icon="🥩", layout="wide")
 init()
@@ -137,7 +89,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🥩 Sistema Completo - Carnicería")
+st.title("🥩 Sistema de Gestión - Carnicería")
 
 menu = st.sidebar.radio("MENÚ", [
     "🏠 Inicio",
@@ -146,17 +98,11 @@ menu = st.sidebar.radio("MENÚ", [
     "📥 Comprar",
     "📋 Pedidos",
     "💡 Precios",
-    "⚠️ Mermas",
-    "📅 Lotes / Caducidad",
     "🚚 Proveedores",
-    "👥 Clientes / Fiados",
     "🧾 Cierre de Caja",
-    "🎯 Metas",
     "🧮 Simulador",
     "📊 Análisis",
-    "📈 Comparativo",
-    "📱 QR",
-    "⬇️ Exportar"
+    "📈 Comparativo"
 ], label_visibility="collapsed")
 
 conn = get_db()
@@ -195,25 +141,6 @@ if menu == "🏠 Inicio":
             dias = r["stock"] / (r["vend"] / 90)
             if dias > 45 and r["stock"] > r["minimo"]:
                 alertas.append(f"🟠 Baja rotación: **{r['nombre']}** (~{dias:.0f} días de stock)")
-
-    try:
-        df_venc = pd.read_sql("""
-            SELECT nombre, caducidad FROM lotes
-            WHERE caducidad IS NOT NULL AND caducidad != ''
-            AND date(caducidad) <= date('now','+7 days')
-            AND date(caducidad) >= date('now')
-        """, conn)
-        for _, r in df_venc.iterrows():
-            alertas.append(f"🟡 Por vencer: **{r['nombre']}** ({r['caducidad']})")
-    except Exception:
-        pass
-
-    try:
-        df_fiado = pd.read_sql("SELECT nombre, saldo FROM clientes WHERE saldo > 0", conn)
-        for _, r in df_fiado.iterrows():
-            alertas.append(f"💳 Fiado: **{r['nombre']}** debe ${r['saldo']:,.0f}")
-    except Exception:
-        pass
 
     if alertas:
         for a in alertas:
@@ -280,7 +207,6 @@ elif menu == "💰 Vender":
         st.session_state.carrito = []
 
     prods = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
-    clientes = conn.execute("SELECT * FROM clientes ORDER BY nombre").fetchall()
 
     col1, col2 = st.columns([2, 1])
 
@@ -291,10 +217,6 @@ elif menu == "💰 Vender":
         }
         sel = st.selectbox("Producto", list(opts.keys()))
         cant = st.number_input("Cantidad (kg)", min_value=0.1, step=0.1, value=1.0)
-
-        cli_opts = {"Mostrador / Contado": None}
-        cli_opts.update({f"{c['nombre']} (debe ${c['saldo'] or 0:,.0f})": c["id"] for c in clientes})
-        cli = st.selectbox("Cliente", list(cli_opts.keys()))
 
         if st.button("➕ Agregar al carrito", use_container_width=True):
             p = opts[sel]
@@ -335,20 +257,14 @@ elif menu == "💰 Vender":
 
             if st.button("✅ FINALIZAR VENTA", use_container_width=True, type="primary"):
                 fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-                cli_id = cli_opts[cli]
                 for item in st.session_state.carrito:
                     conn.execute(
                         "UPDATE productos SET stock = stock - ? WHERE id=?",
                         (item["cantidad"], item["id"])
                     )
                     conn.execute(
-                        "INSERT INTO ventas (producto_id, cantidad, total, fecha, cliente_id) VALUES (?,?,?,?,?)",
-                        (item["id"], item["cantidad"], item["subtotal"], fecha, cli_id)
-                    )
-                if cli_id:
-                    conn.execute(
-                        "UPDATE clientes SET saldo = COALESCE(saldo,0) + ? WHERE id=?",
-                        (total, cli_id)
+                        "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
+                        (item["id"], item["cantidad"], item["subtotal"], fecha)
                     )
                 conn.commit()
                 st.session_state.carrito = []
@@ -382,8 +298,6 @@ elif menu == "📥 Comprar":
 
         cant = st.number_input("Cantidad (kg)", min_value=0.1, step=0.5, value=5.0, key="cc")
         precio = st.number_input("Precio compra $/kg", min_value=0, step=50, key="cpr")
-        lote = st.text_input("Nº Lote (opcional)")
-        caduc = st.date_input("Caducidad (opcional)", value=None)
 
         if precio > 0:
             st.success(f"💡 Precio venta se actualizará a **${round(precio*1.30):,.0f}/kg** (+30%)")
@@ -404,8 +318,7 @@ elif menu == "📥 Comprar":
                 st.session_state.carrito_c.append({
                     "id": p["id"], "nombre": p["nombre"], "cantidad": cant,
                     "precio": precio, "subtotal": cant * precio, "pv": pv,
-                    "prov": prov_opts[prov], "lote": lote,
-                    "caduc": str(caduc) if caduc else ""
+                    "prov": prov_opts[prov]
                 })
             st.success("Agregado")
             st.rerun()
@@ -436,11 +349,6 @@ elif menu == "📥 Comprar":
                         "INSERT INTO compras (producto_id, cantidad, precio, fecha, proveedor_id) VALUES (?,?,?,?,?)",
                         (item["id"], item["cantidad"], item["precio"], fecha, item["prov"])
                     )
-                    if item["lote"] or item["caduc"]:
-                        conn.execute(
-                            "INSERT INTO lotes (producto_id, nombre, cantidad, lote, caducidad, fecha) VALUES (?,?,?,?,?,?)",
-                            (item["id"], item["nombre"], item["cantidad"], item["lote"], item["caduc"], fecha)
-                        )
                 conn.commit()
                 st.session_state.carrito_c = []
                 st.success(f"Compra registrada ${total:,.0f} — Precios actualizados")
@@ -513,55 +421,6 @@ elif menu == "💡 Precios":
     if not hay:
         st.success("Sin cambios de precio sugeridos")
 
-# ---------- MERMAS ----------
-elif menu == "⚠️ Mermas":
-    st.header("⚠️ Mermas")
-    prods = conn.execute("SELECT id, nombre FROM productos ORDER BY nombre").fetchall()
-    opts = {p["nombre"]: p["id"] for p in prods}
-
-    with st.form("merma"):
-        sel = st.selectbox("Producto", list(opts.keys()))
-        cant = st.number_input("Kg perdidos", min_value=0.1, step=0.1, value=1.0)
-        motivo = st.text_input("Motivo", placeholder="Vencimiento, recorte...")
-        if st.form_submit_button("Registrar Merma"):
-            p = conn.execute("SELECT precio, stock FROM productos WHERE id=?", (opts[sel],)).fetchone()
-            if cant > p["stock"]:
-                st.error("Supera el stock")
-            else:
-                costo = round(cant * p["precio"])
-                fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-                conn.execute("UPDATE productos SET stock = stock - ? WHERE id=?", (cant, opts[sel]))
-                conn.execute(
-                    "INSERT INTO mermas (producto_id, cantidad, motivo, costo, fecha) VALUES (?,?,?,?,?)",
-                    (opts[sel], cant, motivo or "—", costo, fecha)
-                )
-                conn.commit()
-                st.success("Merma registrada")
-                st.rerun()
-
-    df = pd.read_sql(
-        "SELECT fecha, producto_id, cantidad, motivo, costo FROM mermas ORDER BY fecha DESC LIMIT 20",
-        conn
-    )
-    if not df.empty:
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.metric("Costo total mermas", f"${df['costo'].sum():,.0f}")
-
-# ---------- LOTES ----------
-elif menu == "📅 Lotes / Caducidad":
-    st.header("📅 Lotes y Caducidad")
-    try:
-        df = pd.read_sql(
-            "SELECT nombre, lote, cantidad, caducidad, fecha FROM lotes ORDER BY caducidad ASC",
-            conn
-        )
-        if df.empty:
-            st.info("Sin lotes. Agrégalos al registrar compras.")
-        else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-    except Exception:
-        st.info("Sin lotes registrados todavía.")
-
 # ---------- PROVEEDORES ----------
 elif menu == "🚚 Proveedores":
     st.header("🚚 Proveedores")
@@ -591,46 +450,6 @@ elif menu == "🚚 Proveedores":
         ORDER BY c.fecha DESC LIMIT 20
     """, conn)
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-# ---------- CLIENTES ----------
-elif menu == "👥 Clientes / Fiados":
-    st.header("👥 Clientes y Fiados")
-    with st.expander("➕ Nuevo cliente"):
-        with st.form("nc"):
-            n = st.text_input("Nombre")
-            t = st.text_input("Teléfono")
-            if st.form_submit_button("Guardar") and n.strip():
-                conn.execute(
-                    "INSERT INTO clientes (nombre, telefono, saldo) VALUES (?,?,0)",
-                    (n, t)
-                )
-                conn.commit()
-                st.success("Guardado")
-                st.rerun()
-
-    st.dataframe(
-        pd.read_sql("SELECT nombre, telefono, COALESCE(saldo,0) as saldo FROM clientes", conn),
-        use_container_width=True, hide_index=True
-    )
-
-    st.subheader("Registrar pago de fiado")
-    clis = conn.execute(
-        "SELECT id, nombre, COALESCE(saldo,0) as saldo FROM clientes WHERE COALESCE(saldo,0) > 0"
-    ).fetchall()
-    if clis:
-        opts = {f"{c['nombre']} (debe ${c['saldo']:,.0f})": c["id"] for c in clis}
-        sel = st.selectbox("Cliente", list(opts.keys()))
-        monto = st.number_input("Monto pagado", min_value=0, step=1000)
-        if st.button("Registrar pago"):
-            conn.execute(
-                "UPDATE clientes SET saldo = MAX(0, COALESCE(saldo,0) - ?) WHERE id=?",
-                (monto, opts[sel])
-            )
-            conn.commit()
-            st.success("Pago registrado")
-            st.rerun()
-    else:
-        st.info("No hay clientes con saldo pendiente")
 
 # ---------- CIERRE ----------
 elif menu == "🧾 Cierre de Caja":
@@ -666,32 +485,6 @@ elif menu == "🧾 Cierre de Caja":
         pd.read_sql("SELECT * FROM cierres ORDER BY fecha DESC LIMIT 15", conn),
         use_container_width=True, hide_index=True
     )
-
-# ---------- METAS ----------
-elif menu == "🎯 Metas":
-    st.header("🎯 Meta de Venta Diaria")
-    meta = get_meta()
-    nueva = st.number_input("Meta del día ($)", min_value=0, value=int(meta), step=5000)
-    if st.button("Guardar meta"):
-        set_meta(nueva)
-        st.success("Meta guardada")
-        st.rerun()
-
-    hoy = datetime.now().strftime("%Y-%m-%d")
-    actual = conn.execute(
-        "SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)
-    ).fetchone()[0]
-    pct = min(100, round(actual / meta * 100)) if meta > 0 else 0
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Meta", f"${meta:,.0f}")
-    c2.metric("Vendido", f"${actual:,.0f}")
-    c3.metric("Avance", f"{pct}%")
-    st.progress(pct / 100)
-    if pct >= 100:
-        st.success("🎉 ¡Meta cumplida!")
-    else:
-        st.info(f"Faltan ${max(0, meta - actual):,.0f}")
 
 # ---------- SIMULADOR ----------
 elif menu == "🧮 Simulador":
@@ -790,54 +583,5 @@ elif menu == "📈 Comparativo":
 
     st.write(f"**Últimos 7 días:** ${esta_sem:,.0f}  |  **7 anteriores:** ${sem_ant:,.0f}  |  Var: {var(esta_sem, sem_ant)}")
     st.write(f"**Este mes:** ${este_mes:,.0f}  |  **Mes pasado:** ${mes_ant:,.0f}  |  Var: {var(este_mes, mes_ant)}")
-
-# ---------- QR ----------
-elif menu == "📱 QR":
-    st.header("📱 Generar QR")
-    prods = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
-    opts = {f"{p['nombre']} (${p['precio']:,.0f}/kg)": p for p in prods}
-    sel = st.selectbox("Producto", list(opts.keys()))
-    p = opts[sel]
-    peso = st.number_input("Peso (kg)", min_value=0.1, step=0.1, value=1.0)
-    total = round(peso * p["precio"])
-    st.write(f"**Total: ${total:,.0f}**")
-
-    if st.button("📱 Generar QR", use_container_width=True):
-        texto = f"""CARNICERÍA
-Producto: {p['nombre']}
-Categoría: {p['categoria']}
-Peso: {peso:.2f} kg
-Precio: ${p['precio']:,.0f}/kg
-Total: ${total:,.0f}
-Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}"""
-        img = generar_qr(texto)
-        st.image(img, width=250)
-        st.code(texto)
-        st.download_button(
-            "⬇️ Descargar QR",
-            data=img,
-            file_name=f"qr_{p['nombre'].replace(' ', '_')}.png",
-            mime="image/png"
-        )
-
-# ---------- EXPORTAR ----------
-elif menu == "⬇️ Exportar":
-    st.header("⬇️ Exportar a CSV")
-
-    if st.button("📦 Productos"):
-        df = pd.read_sql("SELECT * FROM productos", conn)
-        st.download_button("Descargar", df.to_csv(index=False).encode("utf-8"), "productos.csv", "text/csv")
-
-    if st.button("💰 Ventas"):
-        df = pd.read_sql("SELECT * FROM ventas", conn)
-        st.download_button("Descargar", df.to_csv(index=False).encode("utf-8"), "ventas.csv", "text/csv")
-
-    if st.button("📥 Compras"):
-        df = pd.read_sql("SELECT * FROM compras", conn)
-        st.download_button("Descargar", df.to_csv(index=False).encode("utf-8"), "compras.csv", "text/csv")
-
-    if st.button("⚠️ Mermas"):
-        df = pd.read_sql("SELECT * FROM mermas", conn)
-        st.download_button("Descargar", df.to_csv(index=False).encode("utf-8"), "mermas.csv", "text/csv")
 
 conn.close()
