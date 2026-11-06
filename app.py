@@ -2,6 +2,9 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
+import qrcode
+from io import BytesIO
+from PIL import Image
 
 # ==================== BASE DE DATOS ====================
 def get_db():
@@ -44,7 +47,6 @@ def init():
         )
     """)
 
-    # Datos de ejemplo
     if c.execute("SELECT COUNT(*) FROM productos").fetchone()[0] == 0:
         datos = [
             ("Lomo Vetado", "Vacuno", 12990, 15, 5),
@@ -69,7 +71,17 @@ def init():
     conn.commit()
     conn.close()
 
-# ==================== CONFIGURACIÓN ====================
+def generar_qr(texto):
+    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr.add_data(texto)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+# ==================== APP ====================
 st.set_page_config(page_title="Carnicería", page_icon="🥩", layout="wide")
 init()
 
@@ -88,7 +100,15 @@ st.title("🥩 Sistema de Gestión - Carnicería")
 
 menu = st.sidebar.radio(
     "MENÚ PRINCIPAL",
-    ["🏠 Inicio", "📦 Productos", "💰 Vender", "📥 Comprar", "📋 Pedidos", "📊 Análisis de Ventas"],
+    [
+        "🏠 Inicio",
+        "📦 Productos",
+        "💰 Vender",
+        "📥 Comprar",
+        "📋 Pedidos y Predicción",
+        "📊 Análisis Completo",
+        "📱 Generar QR"
+    ],
     label_visibility="collapsed"
 )
 
@@ -100,10 +120,14 @@ if menu == "🏠 Inicio":
 
     total = conn.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
     bajo = conn.execute("SELECT COUNT(*) FROM productos WHERE stock <= minimo").fetchone()[0]
+    ventas_hoy = conn.execute(
+        "SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha) = date('now')"
+    ).fetchone()[0]
 
-    col1, col2 = st.columns(2)
-    col1.metric("Total de productos", total)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total productos", total)
     col2.metric("⚠️ Stock bajo", bajo)
+    col3.metric("Ventas de hoy", f"${ventas_hoy:,.0f}")
 
     st.subheader("Productos con stock bajo")
     df = pd.read_sql_query(
@@ -115,88 +139,69 @@ if menu == "🏠 Inicio":
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ---------- PRODUCTOS (ordenados por sección) ----------
+# ---------- PRODUCTOS ----------
 elif menu == "📦 Productos":
-    st.header("📦 Lista de Productos por Categoría")
+    st.header("📦 Productos por Categoría")
 
-    # Orden personalizado de categorías
-    orden_categorias = ["Vacuno", "Cerdo", "Pollo", "Otros"]
-
-    for cat in orden_categorias:
+    for cat in ["Vacuno", "Cerdo", "Pollo", "Otros"]:
         df_cat = pd.read_sql_query(
             "SELECT id, nombre, precio, stock, minimo FROM productos WHERE categoria = ? ORDER BY nombre",
-            conn,
-            params=(cat,)
+            conn, params=(cat,)
         )
-
         if not df_cat.empty:
             st.subheader(f"🔹 {cat}")
             st.dataframe(df_cat, use_container_width=True, hide_index=True)
-            st.write("")  # espacio
 
     st.markdown("---")
 
-    # --- AGREGAR PRODUCTO ---
-    with st.expander("➕ AGREGAR NUEVO PRODUCTO"):
-        with st.form("form_nuevo"):
-            nombre = st.text_input("Nombre del producto")
+    with st.expander("➕ AGREGAR PRODUCTO"):
+        with st.form("nuevo"):
+            nombre = st.text_input("Nombre")
             categoria = st.selectbox("Categoría", ["Vacuno", "Cerdo", "Pollo", "Otros"])
-            precio = st.number_input("Precio de venta ($/kg)", min_value=0, step=100)
+            precio = st.number_input("Precio $/kg", min_value=0, step=100)
             stock = st.number_input("Stock actual (kg)", min_value=0.0, step=0.5)
-            minimo = st.number_input("Stock mínimo (kg)", min_value=0.0, value=5.0, step=0.5)
-
-            if st.form_submit_button("💾 GUARDAR PRODUCTO"):
+            minimo = st.number_input("Stock mínimo", min_value=0.0, value=5.0, step=0.5)
+            if st.form_submit_button("💾 GUARDAR"):
                 if nombre.strip():
                     conn.execute(
                         "INSERT INTO productos (nombre, categoria, precio, stock, minimo) VALUES (?,?,?,?,?)",
                         (nombre.strip(), categoria, precio, stock, minimo)
                     )
                     conn.commit()
-                    st.success("✅ Producto guardado")
+                    st.success("Producto guardado")
                     st.rerun()
-                else:
-                    st.error("Escribe el nombre del producto")
 
     st.markdown("---")
-
-    # --- ELIMINAR PRODUCTO ---
     st.subheader("🗑️ Eliminar Producto")
     productos = conn.execute("SELECT id, nombre, categoria FROM productos ORDER BY categoria, nombre").fetchall()
-
     if productos:
         opciones = {f"{p['categoria']} - {p['nombre']}": p['id'] for p in productos}
-        seleccionado = st.selectbox("Selecciona el producto a eliminar", list(opciones.keys()))
-
-        if st.button("🗑️ ELIMINAR PRODUCTO", type="primary"):
-            pid = opciones[seleccionado]
-            conn.execute("DELETE FROM productos WHERE id = ?", (pid,))
+        sel = st.selectbox("Producto a eliminar", list(opciones.keys()))
+        if st.button("🗑️ ELIMINAR", type="primary"):
+            conn.execute("DELETE FROM productos WHERE id = ?", (opciones[sel],))
             conn.commit()
-            st.success("Producto eliminado")
+            st.success("Eliminado")
             st.rerun()
-    else:
-        st.info("No hay productos para eliminar")
 
 # ---------- VENDER ----------
 elif menu == "💰 Vender":
     st.header("💰 Registrar Venta")
 
     productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
-
     if not productos:
-        st.warning("No hay productos cargados")
+        st.warning("No hay productos")
     else:
         opciones = {
             f"{p['categoria']} | {p['nombre']} | Stock: {p['stock']:.1f} kg | ${p['precio']:,.0f}": p
             for p in productos
         }
-
-        seleccion = st.selectbox("1. Elige el producto", list(opciones.keys()))
-        cantidad = st.number_input("2. Cantidad (kg)", min_value=0.1, step=0.1, value=1.0)
+        seleccion = st.selectbox("Producto", list(opciones.keys()))
+        cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.1, value=1.0)
 
         if st.button("✅ REGISTRAR VENTA", use_container_width=True):
             p = opciones[seleccion]
             if cantidad > p["stock"]:
-                st.error(f"Stock insuficiente. Solo hay {p['stock']:.1f} kg")
+                st.error(f"Stock insuficiente ({p['stock']:.1f} kg)")
             else:
                 total = cantidad * p["precio"]
                 fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -206,7 +211,7 @@ elif menu == "💰 Vender":
                     (p["id"], cantidad, total, fecha)
                 )
                 conn.commit()
-                st.success(f"✅ Venta registrada: {cantidad:.1f} kg de {p['nombre']} por ${total:,.0f}")
+                st.success(f"Venta registrada: {cantidad:.1f} kg → ${total:,.0f}")
                 st.rerun()
 
 # ---------- COMPRAR ----------
@@ -214,15 +219,11 @@ elif menu == "📥 Comprar":
     st.header("📥 Registrar Compra")
 
     productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
-
-    if not productos:
-        st.warning("No hay productos cargados")
-    else:
+    if productos:
         opciones = {f"{p['categoria']} - {p['nombre']}": p["id"] for p in productos}
-
-        producto = st.selectbox("1. Producto", list(opciones.keys()))
-        cantidad = st.number_input("2. Cantidad (kg)", min_value=0.1, step=0.5, value=5.0)
-        precio = st.number_input("3. Precio de compra ($/kg)", min_value=0, step=100)
+        producto = st.selectbox("Producto", list(opciones.keys()))
+        cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.5, value=5.0)
+        precio = st.number_input("Precio compra $/kg", min_value=0, step=100)
 
         if st.button("✅ REGISTRAR COMPRA", use_container_width=True):
             pid = opciones[producto]
@@ -233,103 +234,172 @@ elif menu == "📥 Comprar":
                 (pid, cantidad, precio, fecha)
             )
             conn.commit()
-            st.success(f"✅ Compra registrada: +{cantidad:.1f} kg")
+            st.success(f"Compra registrada: +{cantidad:.1f} kg")
             st.rerun()
 
-# ---------- PEDIDOS ----------
-elif menu == "📋 Pedidos":
-    st.header("📋 Pedidos Sugeridos")
+# ---------- PEDIDOS Y PREDICCIÓN ----------
+elif menu == "📋 Pedidos y Predicción":
+    st.header("📋 Pedidos Sugeridos + Predicción (3 meses)")
 
-    df = pd.read_sql_query("""
-        SELECT 
-            categoria as Categoría,
-            nombre as Producto,
-            stock as "Stock actual",
-            minimo as "Stock mínimo",
-            ROUND((minimo * 2 - stock), 1) as "Sugerido (kg)"
-        FROM productos 
-        WHERE stock <= minimo
-        ORDER BY categoria, stock
+    # Ventas de los últimos 90 días
+    df_ventas = pd.read_sql_query("""
+        SELECT p.id, p.nombre, p.categoria, p.stock, p.minimo,
+               COALESCE(SUM(v.cantidad), 0) as vendido_90d
+        FROM productos p
+        LEFT JOIN ventas v ON p.id = v.producto_id 
+            AND v.fecha >= date('now', '-90 days')
+        GROUP BY p.id
+        ORDER BY p.categoria, p.nombre
     """, conn)
 
-    if df.empty:
-        st.success("✅ No hay productos que necesiten reposición")
+    if df_ventas.empty:
+        st.info("No hay suficientes datos de ventas aún")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.write(f"**Total de productos a pedir:** {len(df)}")
+        # Cálculos
+        df_ventas["promedio_diario"] = df_ventas["vendido_90d"] / 90
+        df_ventas["proyeccion_30d"] = (df_ventas["promedio_diario"] * 30).round(1)
+        df_ventas["sugerido_compra"] = (
+            df_ventas["proyeccion_30d"] + df_ventas["minimo"] - df_ventas["stock"]
+        ).clip(lower=0).round(1)
 
-# ---------- ANÁLISIS DE VENTAS ----------
-elif menu == "📊 Análisis de Ventas":
-    st.header("📊 Análisis de Ventas")
+        st.subheader("Pronóstico y sugerencia de compra (próximos 30 días)")
+        st.dataframe(
+            df_ventas[["categoria", "nombre", "stock", "vendido_90d", "proyeccion_30d", "sugerido_compra"]]
+            .rename(columns={
+                "categoria": "Categoría",
+                "nombre": "Producto",
+                "stock": "Stock actual",
+                "vendido_90d": "Vendido últimos 90 días",
+                "proyeccion_30d": "Proyección 30 días",
+                "sugerido_compra": "Sugerido comprar (kg)"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
 
-    # Resumen general
-    total_ventas = conn.execute("SELECT COALESCE(SUM(total), 0) FROM ventas").fetchone()[0]
-    total_kilos = conn.execute("SELECT COALESCE(SUM(cantidad), 0) FROM ventas").fetchone()[0]
-    num_ventas = conn.execute("SELECT COUNT(*) FROM ventas").fetchone()[0]
+        total_sugerido = df_ventas["sugerido_compra"].sum()
+        st.metric("Total kilos sugeridos a comprar", f"{total_sugerido:.1f} kg")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💰 Total vendido", f"${total_ventas:,.0f}")
-    col2.metric("⚖️ Kilos vendidos", f"{total_kilos:.1f} kg")
-    col3.metric("🧾 Número de ventas", num_ventas)
+        # Solo los que necesitan compra
+        necesita = df_ventas[df_ventas["sugerido_compra"] > 0]
+        if not necesita.empty:
+            st.subheader("⚠️ Productos que sí conviene comprar")
+            st.dataframe(
+                necesita[["categoria", "nombre", "stock", "sugerido_compra"]]
+                .rename(columns={
+                    "categoria": "Categoría",
+                    "nombre": "Producto",
+                    "stock": "Stock actual",
+                    "sugerido_compra": "Comprar (kg)"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+# ---------- ANÁLISIS COMPLETO ----------
+elif menu == "📊 Análisis Completo":
+    st.header("📊 Análisis de Ventas y Compras")
+
+    # KPIs
+    total_ventas = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas").fetchone()[0]
+    total_kilos_v = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas").fetchone()[0]
+    total_compras = conn.execute("SELECT COALESCE(SUM(cantidad*precio),0) FROM compras").fetchone()[0]
+    total_kilos_c = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM compras").fetchone()[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Total Ventas", f"${total_ventas:,.0f}")
+    c2.metric("⚖️ Kilos Vendidos", f"{total_kilos_v:.1f}")
+    c3.metric("🛒 Total Compras", f"${total_compras:,.0f}")
+    c4.metric("📦 Kilos Comprados", f"{total_kilos_c:.1f}")
 
     st.markdown("---")
 
-    # Productos más vendidos
-    st.subheader("🏆 Productos más vendidos")
+    # Gráfico ventas por producto
+    st.subheader("🏆 Productos más vendidos (kg)")
     df_top = pd.read_sql_query("""
-        SELECT 
-            p.nombre as Producto,
-            p.categoria as Categoría,
-            ROUND(SUM(v.cantidad), 1) as "Kilos vendidos",
-            ROUND(SUM(v.total), 0) as "Total $"
+        SELECT p.nombre, ROUND(SUM(v.cantidad),1) as kilos
         FROM ventas v
         JOIN productos p ON v.producto_id = p.id
         GROUP BY v.producto_id
-        ORDER BY SUM(v.cantidad) DESC
+        ORDER BY kilos DESC
         LIMIT 10
     """, conn)
 
-    if df_top.empty:
-        st.info("Todavía no hay ventas registradas")
+    if not df_top.empty:
+        st.bar_chart(df_top.set_index("nombre"))
     else:
-        st.dataframe(df_top, use_container_width=True, hide_index=True)
+        st.info("Aún no hay ventas")
 
     st.markdown("---")
 
     # Ventas por categoría
-    st.subheader("📦 Ventas por categoría")
+    st.subheader("📦 Ventas por Categoría")
     df_cat = pd.read_sql_query("""
-        SELECT 
-            p.categoria as Categoría,
-            ROUND(SUM(v.cantidad), 1) as "Kilos",
-            ROUND(SUM(v.total), 0) as "Total $"
+        SELECT p.categoria, ROUND(SUM(v.cantidad),1) as kilos, ROUND(SUM(v.total),0) as total
         FROM ventas v
         JOIN productos p ON v.producto_id = p.id
         GROUP BY p.categoria
-        ORDER BY SUM(v.total) DESC
+        ORDER BY total DESC
     """, conn)
 
     if not df_cat.empty:
-        st.dataframe(df_cat, use_container_width=True, hide_index=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Kilos vendidos")
+            st.bar_chart(df_cat.set_index("categoria")["kilos"])
+        with col2:
+            st.write("Dinero ($)")
+            st.bar_chart(df_cat.set_index("categoria")["total"])
 
     st.markdown("---")
 
     # Últimas ventas
-    st.subheader("🕒 Últimas ventas")
-    df_ultimas = pd.read_sql_query("""
-        SELECT 
-            v.fecha as Fecha,
-            p.nombre as Producto,
-            p.categoria as Categoría,
-            v.cantidad as Kg,
-            v.total as Total
+    st.subheader("🕒 Últimas 15 ventas")
+    df_ult = pd.read_sql_query("""
+        SELECT v.fecha, p.nombre, p.categoria, v.cantidad, v.total
         FROM ventas v
         JOIN productos p ON v.producto_id = p.id
-        ORDER BY v.fecha DESC
-        LIMIT 15
+        ORDER BY v.fecha DESC LIMIT 15
     """, conn)
+    if not df_ult.empty:
+        st.dataframe(df_ult, use_container_width=True, hide_index=True)
 
-    if not df_ultimas.empty:
-        st.dataframe(df_ultimas, use_container_width=True, hide_index=True)
+# ---------- GENERAR QR ----------
+elif menu == "📱 Generar QR":
+    st.header("📱 Generar Código QR de Producto")
+
+    st.write("Úsalo para entregar al cliente un QR con el detalle del producto.")
+
+    productos = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
+    if productos:
+        opciones = {f"{p['categoria']} - {p['nombre']} (${p['precio']:,.0f}/kg)": p for p in productos}
+        seleccion = st.selectbox("Producto", list(opciones.keys()))
+        p = opciones[seleccion]
+
+        peso = st.number_input("Peso (kg)", min_value=0.1, step=0.1, value=1.0)
+        total = peso * p["precio"]
+
+        st.write(f"**Total a pagar:** ${total:,.0f}")
+
+        texto_qr = f"""
+CARNICERÍA
+Producto: {p['nombre']}
+Categoría: {p['categoria']}
+Peso: {peso:.2f} kg
+Precio: ${p['precio']:,.0f}/kg
+Total: ${total:,.0f}
+Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+""".strip()
+
+        if st.button("📱 GENERAR QR", use_container_width=True):
+            img_buffer = generar_qr(texto_qr)
+            st.image(img_buffer, caption="Código QR del producto", width=300)
+            st.code(texto_qr)
+            st.download_button(
+                "⬇️ Descargar QR",
+                data=img_buffer,
+                file_name=f"qr_{p['nombre'].replace(' ', '_')}.png",
+                mime="image/png"
+            )
 
 conn.close()
