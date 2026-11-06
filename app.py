@@ -44,7 +44,7 @@ def init():
         )
     """)
 
-    # Datos de ejemplo (solo la primera vez)
+    # Datos de ejemplo
     if c.execute("SELECT COUNT(*) FROM productos").fetchone()[0] == 0:
         datos = [
             ("Lomo Vetado", "Vacuno", 12990, 15, 5),
@@ -69,18 +69,39 @@ def init():
     conn.commit()
     conn.close()
 
-# ==================== INTERFAZ ====================
+# ==================== CONFIGURACIÓN ====================
 st.set_page_config(page_title="Carnicería", page_icon="🥩", layout="wide")
 init()
 
+# Estilos para botones más grandes
+st.markdown("""
+    <style>
+    .stButton > button {
+        height: 60px;
+        font-size: 20px !important;
+        font-weight: bold;
+        border-radius: 10px;
+    }
+    .stSelectbox label, .stNumberInput label {
+        font-size: 18px !important;
+        font-weight: bold;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("🥩 Sistema de Gestión - Carnicería")
 
-menu = st.sidebar.radio("Menú", ["Inicio", "Productos", "Vender", "Comprar", "Pedidos"])
+# Menú grande
+menu = st.sidebar.radio(
+    "MENÚ PRINCIPAL",
+    ["🏠 Inicio", "📦 Productos", "💰 Vender", "📥 Comprar", "📋 Pedidos"],
+    label_visibility="collapsed"
+)
 
 conn = get_db()
 
 # ---------- INICIO ----------
-if menu == "Inicio":
+if menu == "🏠 Inicio":
     st.header("Panel Principal")
 
     total = conn.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
@@ -88,7 +109,7 @@ if menu == "Inicio":
 
     col1, col2 = st.columns(2)
     col1.metric("Total de productos", total)
-    col2.metric("⚠️ Productos con stock bajo", bajo)
+    col2.metric("⚠️ Stock bajo", bajo)
 
     st.subheader("Productos con stock bajo")
     df = pd.read_sql_query(
@@ -96,105 +117,140 @@ if menu == "Inicio":
         conn
     )
     if df.empty:
-        st.success("No hay productos con stock bajo")
+        st.success("✅ No hay productos con stock bajo")
     else:
         st.dataframe(df, use_container_width=True)
 
 # ---------- PRODUCTOS ----------
-elif menu == "Productos":
-    st.header("📦 Productos")
+elif menu == "📦 Productos":
+    st.header("📦 Lista de Productos")
 
-    df = pd.read_sql_query("SELECT * FROM productos ORDER BY categoria, nombre", conn)
-    st.dataframe(df, use_container_width=True)
+    df = pd.read_sql_query("SELECT id, nombre, categoria, precio, stock, minimo FROM productos ORDER BY categoria, nombre", conn)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with st.expander("➕ Agregar nuevo producto"):
+    st.markdown("---")
+
+    # --- AGREGAR PRODUCTO ---
+    with st.expander("➕ AGREGAR NUEVO PRODUCTO", expanded=False):
         with st.form("form_nuevo"):
-            nombre = st.text_input("Nombre del producto")
+            nombre = st.text_input("Nombre del producto", placeholder="Ej: Lomo Vetado")
             categoria = st.selectbox("Categoría", ["Vacuno", "Cerdo", "Pollo", "Otros"])
             precio = st.number_input("Precio de venta ($/kg)", min_value=0, step=100)
             stock = st.number_input("Stock actual (kg)", min_value=0.0, step=0.5)
             minimo = st.number_input("Stock mínimo (kg)", min_value=0.0, value=5.0, step=0.5)
 
-            if st.form_submit_button("Guardar producto"):
+            if st.form_submit_button("💾 GUARDAR PRODUCTO"):
                 if nombre.strip():
                     conn.execute(
                         "INSERT INTO productos (nombre, categoria, precio, stock, minimo) VALUES (?,?,?,?,?)",
                         (nombre.strip(), categoria, precio, stock, minimo)
                     )
                     conn.commit()
-                    st.success("Producto guardado correctamente")
+                    st.success("✅ Producto guardado correctamente")
                     st.rerun()
                 else:
-                    st.error("El nombre es obligatorio")
+                    st.error("Debes escribir el nombre del producto")
+
+    st.markdown("---")
+
+    # --- ELIMINAR PRODUCTO ---
+    st.subheader("🗑️ Eliminar Producto")
+    
+    productos = conn.execute("SELECT id, nombre FROM productos ORDER BY nombre").fetchall()
+    
+    if productos:
+        opciones_eliminar = {f"{p['nombre']} (ID: {p['id']})": p['id'] for p in productos}
+        producto_a_eliminar = st.selectbox("Selecciona el producto que quieres eliminar", list(opciones_eliminar.keys()))
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("🗑️ ELIMINAR PRODUCTO", type="primary"):
+                pid = opciones_eliminar[producto_a_eliminar]
+                conn.execute("DELETE FROM productos WHERE id = ?", (pid,))
+                conn.commit()
+                st.success("Producto eliminado correctamente")
+                st.rerun()
+    else:
+        st.info("No hay productos para eliminar")
 
 # ---------- VENDER ----------
-elif menu == "Vender":
+elif menu == "💰 Vender":
     st.header("💰 Registrar Venta")
 
     productos = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
-    opciones = {
-        f"{p['nombre']} | Stock: {p['stock']:.1f} kg | ${p['precio']:,.0f}/kg": p
-        for p in productos
-    }
+    
+    if not productos:
+        st.warning("No hay productos cargados")
+    else:
+        opciones = {
+            f"{p['nombre']}  |  Stock: {p['stock']:.1f} kg  |  ${p['precio']:,.0f}/kg": p
+            for p in productos
+        }
 
-    seleccion = st.selectbox("Selecciona el producto", list(opciones.keys()))
-    cantidad = st.number_input("Cantidad (kg)", min_value=0.1, step=0.1, value=1.0)
+        seleccion = st.selectbox("1. Elige el producto", list(opciones.keys()))
+        cantidad = st.number_input("2. Cantidad en kilos", min_value=0.1, step=0.1, value=1.0)
 
-    if st.button("Registrar Venta", type="primary"):
-        p = opciones[seleccion]
+        st.write("")
+        if st.button("✅ REGISTRAR VENTA", use_container_width=True):
+            p = opciones[seleccion]
 
-        if cantidad > p["stock"]:
-            st.error(f"Stock insuficiente. Solo hay {p['stock']:.1f} kg")
-        else:
-            total = cantidad * p["precio"]
-            fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+            if cantidad > p["stock"]:
+                st.error(f"❌ No hay suficiente stock. Solo quedan {p['stock']:.1f} kg")
+            else:
+                total = cantidad * p["precio"]
+                fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            conn.execute("UPDATE productos SET stock = stock - ? WHERE id = ?", (cantidad, p["id"]))
-            conn.execute(
-                "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
-                (p["id"], cantidad, total, fecha)
-            )
-            conn.commit()
-            st.success(f"Venta registrada: {cantidad:.1f} kg de {p['nombre']} por ${total:,.0f}")
-            st.rerun()
+                conn.execute("UPDATE productos SET stock = stock - ? WHERE id = ?", (cantidad, p["id"]))
+                conn.execute(
+                    "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
+                    (p["id"], cantidad, total, fecha)
+                )
+                conn.commit()
+                st.success(f"✅ Venta registrada: {cantidad:.1f} kg de {p['nombre']} por ${total:,.0f}")
+                st.rerun()
 
 # ---------- COMPRAR ----------
-elif menu == "Comprar":
-    st.header("📥 Registrar Compra / Entrada de Stock")
+elif menu == "📥 Comprar":
+    st.header("📥 Registrar Compra")
 
     productos = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
-    opciones = {p["nombre"]: p["id"] for p in productos}
+    
+    if not productos:
+        st.warning("No hay productos cargados")
+    else:
+        opciones = {p["nombre"]: p["id"] for p in productos}
 
-    producto = st.selectbox("Producto", list(opciones.keys()))
-    cantidad = st.number_input("Cantidad comprada (kg)", min_value=0.1, step=0.5)
-    precio = st.number_input("Precio de compra ($/kg)", min_value=0, step=100)
+        producto = st.selectbox("1. Elige el producto", list(opciones.keys()))
+        cantidad = st.number_input("2. Cantidad comprada (kg)", min_value=0.1, step=0.5, value=5.0)
+        precio = st.number_input("3. Precio de compra ($/kg)", min_value=0, step=100)
 
-    if st.button("Registrar Compra", type="primary"):
-        pid = opciones[producto]
-        fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+        st.write("")
+        if st.button("✅ REGISTRAR COMPRA", use_container_width=True):
+            pid = opciones[producto]
+            fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        conn.execute("UPDATE productos SET stock = stock + ? WHERE id = ?", (cantidad, pid))
-        conn.execute(
-            "INSERT INTO compras (producto_id, cantidad, precio, fecha) VALUES (?,?,?,?)",
-            (pid, cantidad, precio, fecha)
-        )
-        conn.commit()
-        st.success(f"Compra registrada: +{cantidad:.1f} kg de {producto}")
-        st.rerun()
+            conn.execute("UPDATE productos SET stock = stock + ? WHERE id = ?", (cantidad, pid))
+            conn.execute(
+                "INSERT INTO compras (producto_id, cantidad, precio, fecha) VALUES (?,?,?,?)",
+                (pid, cantidad, precio, fecha)
+            )
+            conn.commit()
+            st.success(f"✅ Compra registrada: +{cantidad:.1f} kg de {producto}")
+            st.rerun()
 
 # ---------- PEDIDOS ----------
-elif menu == "Pedidos":
+elif menu == "📋 Pedidos":
     st.header("📋 Pedidos Sugeridos")
 
-    st.write("Productos que están en o bajo el stock mínimo:")
+    st.write("Estos productos están en o bajo el stock mínimo:")
 
     df = pd.read_sql_query("""
         SELECT 
-            nombre,
-            categoria,
-            stock,
-            minimo,
-            ROUND((minimo * 2 - stock), 1) as sugerido_kg
+            nombre as Producto,
+            categoria as Categoría,
+            stock as "Stock actual",
+            minimo as "Stock mínimo",
+            ROUND((minimo * 2 - stock), 1) as "Sugerido (kg)"
         FROM productos 
         WHERE stock <= minimo
         ORDER BY stock ASC
@@ -203,7 +259,7 @@ elif menu == "Pedidos":
     if df.empty:
         st.success("✅ No hay productos que necesiten reposición")
     else:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.write(f"**Total de productos a pedir:** {len(df)}")
 
 conn.close()
