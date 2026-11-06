@@ -34,13 +34,9 @@ def init():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fecha TEXT, total REAL, kilos REAL, num INTEGER, notas TEXT)""")
 
-    # Cola de ventas pendientes (carnicero → cajera)
     c.execute("""CREATE TABLE IF NOT EXISTS pendientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        items TEXT,
-        total REAL,
-        fecha TEXT,
-        estado TEXT DEFAULT 'pendiente')""")
+        items TEXT, total REAL, fecha TEXT, estado TEXT DEFAULT 'pendiente')""")
 
     try:
         c.execute("ALTER TABLE compras ADD COLUMN proveedor_id INTEGER")
@@ -81,64 +77,94 @@ def init():
     conn.commit()
     conn.close()
 
-# ==================== APP ====================
+# ==================== ESTILOS ====================
 st.set_page_config(page_title="Carnicería", page_icon="🥩", layout="wide")
 init()
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+
 .stButton > button {
-    height: 70px !important;
+    height: 72px !important;
     font-size: 18px !important;
-    font-weight: 800 !important;
-    border-radius: 12px !important;
-    background-color: #27ae60 !important;
+    font-weight: 700 !important;
+    border-radius: 16px !important;
+    background: linear-gradient(135deg, #27ae60, #1e8449) !important;
     color: white !important;
     border: none !important;
+    box-shadow: 0 4px 12px rgba(39,174,96,0.3);
+    transition: all 0.2s ease;
 }
 .stButton > button:hover {
-    background-color: #1e8449 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(39,174,96,0.4);
 }
+
 div[data-testid="column"] .stButton > button {
-    height: 65px !important;
-    font-size: 16px !important;
+    height: 68px !important;
+    font-size: 15px !important;
+    border-radius: 14px !important;
+}
+
+.big-total {
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: #27ae60;
+    margin: 12px 0;
+}
+.ticket-card {
+    background: #f8f9fa;
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 12px;
+    border-left: 5px solid #27ae60;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# Elegir modo
+# ==================== SELECCIÓN DE MODO ====================
 if "modo" not in st.session_state:
     st.session_state.modo = None
 
 if st.session_state.modo is None:
-    st.title("🥩 Sistema de Gestión - Carnicería")
-    st.markdown("### ¿Quién está usando el sistema?")
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("## 🥩 Bienvenido a la Carnicería")
+    st.markdown("### ¿Quién va a usar el sistema?")
+    st.markdown("<br>", unsafe_allow_html=True)
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔪 MODO CARNICERO\n(Solo ventas)", use_container_width=True):
+        if st.button("🔪  CARNICERO\n\nArmar pedidos", use_container_width=True):
             st.session_state.modo = "carnicero"
             st.session_state.ticket = []
             st.session_state.cantidad_str = ""
             st.session_state.prod_sel = None
             st.rerun()
     with col2:
-        if st.button("💵 MODO CAJA\n(Cobrar + gestión)", use_container_width=True):
+        if st.button("💵  CAJA\n\nCobrar y gestionar", use_container_width=True):
             st.session_state.modo = "caja"
             st.rerun()
     st.stop()
 
-# Botón para cambiar de modo
-if st.sidebar.button("🔄 Cambiar de modo"):
+# Botón cambiar modo
+st.sidebar.markdown("### 🔄 Cambiar modo")
+if st.sidebar.button("Volver al inicio", use_container_width=True):
     st.session_state.modo = None
     st.rerun()
 
 conn = get_db()
 
 # ============================================================
-#                    MODO CARNICERO
+#                         CARNICERO
 # ============================================================
 if st.session_state.modo == "carnicero":
-    st.title("🔪 Modo Carnicero")
+    st.markdown("## 🔪 Modo Carnicero")
+    st.caption("Elige producto → marca kilos → envía a caja")
 
     if "ticket" not in st.session_state:
         st.session_state.ticket = []
@@ -149,9 +175,10 @@ if st.session_state.modo == "carnicero":
 
     prods = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
 
-    # --- Productos por categoría (botones grandes) ---
-    st.subheader("1. Elige el producto")
+    # Productos
+    st.markdown("### 1️⃣ Elige el producto")
     cats = {"Vacuno": "🥩", "Cerdo": "🐷", "Pollo": "🐔", "Otros": "📦"}
+
     for cat, icon in cats.items():
         lista = [p for p in prods if p["categoria"] == cat]
         if not lista:
@@ -160,28 +187,27 @@ if st.session_state.modo == "carnicero":
         cols = st.columns(4)
         for i, p in enumerate(lista):
             with cols[i % 4]:
-                label = f"{p['nombre']}\n${p['precio']:,.0f}/kg"
+                activo = st.session_state.prod_sel and st.session_state.prod_sel["id"] == p["id"]
+                label = f"{'✅ ' if activo else ''}{p['nombre']}\n${p['precio']:,.0f}"
                 if st.button(label, key=f"p{p['id']}", use_container_width=True):
                     st.session_state.prod_sel = dict(p)
                     st.session_state.cantidad_str = ""
                     st.rerun()
 
-    # --- Teclado numérico ---
-    st.subheader("2. Ingresa los kilos")
-    if st.session_state.prod_sel:
-        st.info(f"Producto: **{st.session_state.prod_sel['nombre']}** — ${st.session_state.prod_sel['precio']:,.0f}/kg")
-    else:
-        st.warning("Primero elige un producto")
+    st.markdown("---")
 
-    st.markdown(f"### Cantidad: **{st.session_state.cantidad_str or '0'}** kg")
+    # Kilos
+    st.markdown("### 2️⃣ Marca los kilos")
+    if st.session_state.prod_sel:
+        st.success(f"Producto: **{st.session_state.prod_sel['nombre']}**  ·  ${st.session_state.prod_sel['precio']:,.0f}/kg")
+    else:
+        st.warning("Primero elige un producto arriba")
+
+    cantidad_mostrar = st.session_state.cantidad_str or "0"
+    st.markdown(f"<div class='big-total'>{cantidad_mostrar} kg</div>", unsafe_allow_html=True)
 
     # Teclado
-    teclas = [
-        ["1", "2", "3"],
-        ["4", "5", "6"],
-        ["7", "8", "9"],
-        [".", "0", "⌫"]
-    ]
+    teclas = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "⌫"]]
     for fila in teclas:
         cols = st.columns(3)
         for i, t in enumerate(fila):
@@ -193,12 +219,11 @@ if st.session_state.modo == "carnicero":
                         st.session_state.cantidad_str += t
                     st.rerun()
 
-    # Agregar al ticket
-    if st.button("➕ AGREGAR AL TICKET", use_container_width=True):
+    if st.button("➕  AGREGAR AL TICKET", use_container_width=True):
         if not st.session_state.prod_sel:
             st.error("Elige un producto")
         elif not st.session_state.cantidad_str:
-            st.error("Ingresa la cantidad")
+            st.error("Ingresa los kilos")
         else:
             try:
                 cant = float(st.session_state.cantidad_str)
@@ -216,28 +241,35 @@ if st.session_state.modo == "carnicero":
                     })
                     st.session_state.prod_sel = None
                     st.session_state.cantidad_str = ""
-                    st.success("Agregado al ticket")
                     st.rerun()
             except ValueError:
                 st.error("Cantidad inválida")
 
-    # --- Ticket actual ---
-    st.subheader("🛒 Ticket actual")
+    st.markdown("---")
+
+    # Ticket
+    st.markdown("### 🛒 Ticket")
     if not st.session_state.ticket:
-        st.info("Sin productos aún")
+        st.info("Todavía no hay productos")
     else:
         total = 0
         for i, item in enumerate(st.session_state.ticket):
-            st.write(f"**{item['nombre']}** — {item['cantidad']:.2f} kg × ${item['precio']:,.0f} = **${item['subtotal']:,.0f}**")
-            if st.button("❌ Quitar", key=f"qt{i}"):
-                st.session_state.ticket.pop(i)
-                st.rerun()
+            cols = st.columns([5, 1])
+            with cols[0]:
+                st.markdown(
+                    f"**{item['nombre']}**  ·  {item['cantidad']:.2f} kg  ×  ${item['precio']:,.0f}  =  **${item['subtotal']:,.0f}**"
+                )
+            with cols[1]:
+                if st.button("❌", key=f"qt{i}"):
+                    st.session_state.ticket.pop(i)
+                    st.rerun()
             total += item["subtotal"]
-        st.markdown(f"## TOTAL: ${total:,.0f}")
+
+        st.markdown(f"<div class='big-total'>TOTAL: ${total:,.0f}</div>", unsafe_allow_html=True)
 
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("📤 ENVIAR A CAJA", use_container_width=True, type="primary"):
+            if st.button("📤  ENVIAR A CAJA", use_container_width=True):
                 fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
                 conn.execute(
                     "INSERT INTO pendientes (items, total, fecha, estado) VALUES (?,?,?,?)",
@@ -246,116 +278,118 @@ if st.session_state.modo == "carnicero":
                 conn.commit()
                 st.session_state.ticket = []
                 st.success("✅ Enviado a caja")
+                st.balloons()
                 st.rerun()
         with col_b:
-            if st.button("🗑️ Cancelar ticket", use_container_width=True):
+            if st.button("🗑️  Cancelar", use_container_width=True):
                 st.session_state.ticket = []
                 st.rerun()
 
 # ============================================================
-#                      MODO CAJA
+#                           CAJA
 # ============================================================
 elif st.session_state.modo == "caja":
-    st.title("💵 Modo Caja")
+    st.markdown("## 💵 Modo Caja")
 
-    menu = st.sidebar.radio("MENÚ CAJA", [
-        "🧾 Cobrar pendientes",
-        "🏠 Inicio",
+    menu = st.sidebar.radio("Menú", [
+        "🧾 Cobrar",
+        "🏠 Resumen",
         "📦 Productos",
-        "📥 Comprar",
+        "📥 Compras",
         "📋 Pedidos",
         "💡 Precios",
         "🚚 Proveedores",
         "🧾 Cierre de Caja",
-        "🧮 Simulador",
-        "📊 Análisis",
-        "📈 Comparativo"
+        "📊 Análisis"
     ], label_visibility="collapsed")
 
-    # ----- COBRAR PENDIENTES -----
-    if menu == "🧾 Cobrar pendientes":
-        st.header("🧾 Ventas pendientes del carnicero")
-
+    # ----- COBRAR -----
+    if menu == "🧾 Cobrar":
+        st.markdown("### 🧾 Tickets pendientes")
         pendientes = conn.execute(
-            "SELECT * FROM pendientes WHERE estado='pendiente' ORDER BY id DESC"
+            "SELECT * FROM pendientes WHERE estado='pendiente' ORDER BY id ASC"
         ).fetchall()
 
         if not pendientes:
-            st.success("✅ No hay ventas pendientes")
+            st.success("✅ No hay tickets pendientes")
         else:
             for pend in pendientes:
                 items = json.loads(pend["items"])
-                with st.container():
-                    st.markdown(f"### Ticket #{pend['id']} — {pend['fecha']}")
-                    for it in items:
-                        st.write(f"• {it['nombre']}: {it['cantidad']:.2f} kg × ${it['precio']:,.0f} = ${it['subtotal']:,.0f}")
-                    st.markdown(f"## TOTAL: ${pend['total']:,.0f}")
+                st.markdown(f"""
+                <div class="ticket-card">
+                    <strong>Ticket #{pend['id']}</strong> &nbsp;·&nbsp; {pend['fecha']}
+                </div>
+                """, unsafe_allow_html=True)
 
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button(f"✅ COBRAR ${pend['total']:,.0f}", key=f"cob{pend['id']}", use_container_width=True):
-                            # Registrar venta y descontar stock
-                            for it in items:
-                                conn.execute(
-                                    "UPDATE productos SET stock = stock - ? WHERE id=?",
-                                    (it["cantidad"], it["id"])
-                                )
-                                conn.execute(
-                                    "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
-                                    (it["id"], it["cantidad"], it["subtotal"], pend["fecha"])
-                                )
-                            conn.execute(
-                                "UPDATE pendientes SET estado='cobrado' WHERE id=?",
-                                (pend["id"],)
-                            )
-                            conn.commit()
-                            st.success(f"Cobrado ${pend['total']:,.0f}")
-                            st.rerun()
-                    with col2:
-                        if st.button("❌ Anular", key=f"an{pend['id']}", use_container_width=True):
-                            conn.execute(
-                                "UPDATE pendientes SET estado='anulado' WHERE id=?",
-                                (pend["id"],)
-                            )
-                            conn.commit()
-                            st.warning("Ticket anulado")
-                            st.rerun()
-                    st.divider()
+                for it in items:
+                    st.write(f"• **{it['nombre']}** — {it['cantidad']:.2f} kg × ${it['precio']:,.0f} = ${it['subtotal']:,.0f}")
 
-    # ----- INICIO -----
-    elif menu == "🏠 Inicio":
-        st.header("Panel Principal")
-        total = conn.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
-        bajo = conn.execute("SELECT COUNT(*) FROM productos WHERE stock <= minimo").fetchone()[0]
+                st.markdown(f"<div class='big-total'>TOTAL: ${pend['total']:,.0f}</div>", unsafe_allow_html=True)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button(f"✅  COBRAR  ${pend['total']:,.0f}", key=f"cob{pend['id']}", use_container_width=True):
+                        for it in items:
+                            conn.execute(
+                                "UPDATE productos SET stock = stock - ? WHERE id=?",
+                                (it["cantidad"], it["id"])
+                            )
+                            conn.execute(
+                                "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
+                                (it["id"], it["cantidad"], it["subtotal"], pend["fecha"])
+                            )
+                        conn.execute(
+                            "UPDATE pendientes SET estado='cobrado' WHERE id=?",
+                            (pend["id"],)
+                        )
+                        conn.commit()
+                        st.success(f"Cobrado ${pend['total']:,.0f}")
+                        st.rerun()
+                with col2:
+                    if st.button("❌  Anular", key=f"an{pend['id']}", use_container_width=True):
+                        conn.execute(
+                            "UPDATE pendientes SET estado='anulado' WHERE id=?",
+                            (pend["id"],)
+                        )
+                        conn.commit()
+                        st.warning("Anulado")
+                        st.rerun()
+                st.markdown("---")
+
+    # ----- RESUMEN -----
+    elif menu == "🏠 Resumen":
+        st.markdown("### 🏠 Resumen del día")
         hoy = datetime.now().strftime("%Y-%m-%d")
-        ventas_hoy = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        pend_count = conn.execute("SELECT COUNT(*) FROM pendientes WHERE estado='pendiente'").fetchone()[0]
+        total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
+        kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
+        num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
+        pend = conn.execute("SELECT COUNT(*) FROM pendientes WHERE estado='pendiente'").fetchone()[0]
+        bajo = conn.execute("SELECT COUNT(*) FROM productos WHERE stock <= minimo").fetchone()[0]
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Productos", total)
-        c2.metric("⚠️ Stock bajo", bajo)
-        c3.metric("Ventas hoy", f"${ventas_hoy:,.0f}")
-        c4.metric("⏳ Pendientes", pend_count)
+        c1.metric("💰 Ventas hoy", f"${total:,.0f}")
+        c2.metric("⚖️ Kilos", f"{kilos:.1f}")
+        c3.metric("🧾 Nº ventas", num)
+        c4.metric("⏳ Pendientes", pend)
 
-        if pend_count > 0:
-            st.warning(f"Hay **{pend_count}** ticket(s) esperando cobro")
-
-        df_bajo = pd.read_sql("SELECT nombre, stock, minimo FROM productos WHERE stock <= minimo", conn)
-        if not df_bajo.empty:
-            st.subheader("Stock bajo")
-            st.dataframe(df_bajo, use_container_width=True, hide_index=True)
+        if pend > 0:
+            st.warning(f"Hay **{pend}** ticket(s) esperando cobro → ve a **Cobrar**")
+        if bajo > 0:
+            st.error(f"**{bajo}** producto(s) con stock bajo")
+            df = pd.read_sql("SELECT nombre, stock, minimo FROM productos WHERE stock <= minimo", conn)
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
     # ----- PRODUCTOS -----
     elif menu == "📦 Productos":
-        st.header("📦 Productos")
+        st.markdown("### 📦 Productos")
         stickers = {"Vacuno": "🥩 VACUNO", "Cerdo": "🐷 CERDO", "Pollo": "🐔 POLLO", "Otros": "📦 OTROS"}
         for cat in ["Vacuno", "Cerdo", "Pollo", "Otros"]:
             df = pd.read_sql(
-                "SELECT id, nombre, precio, stock, minimo FROM productos WHERE categoria=? ORDER BY nombre",
+                "SELECT nombre, precio, stock, minimo FROM productos WHERE categoria=? ORDER BY nombre",
                 conn, params=(cat,)
             )
             if not df.empty:
-                st.markdown(f"### {stickers[cat]}")
+                st.markdown(f"#### {stickers[cat]}")
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
         with st.expander("➕ Agregar producto"):
@@ -365,7 +399,7 @@ elif st.session_state.modo == "caja":
                 precio = st.number_input("Precio $/kg", min_value=0, step=100)
                 stock = st.number_input("Stock kg", min_value=0.0, step=0.5)
                 minimo = st.number_input("Mínimo", min_value=0.0, value=5.0, step=0.5)
-                if st.form_submit_button("💾 GUARDAR") and n.strip():
+                if st.form_submit_button("💾 Guardar") and n.strip():
                     conn.execute(
                         "INSERT INTO productos (nombre,categoria,precio,stock,minimo) VALUES (?,?,?,?,?)",
                         (n.strip(), cat, precio, stock, minimo)
@@ -374,74 +408,52 @@ elif st.session_state.modo == "caja":
                     st.success("Guardado")
                     st.rerun()
 
-        st.subheader("🗑️ Eliminar")
-        prods = conn.execute("SELECT id, nombre, categoria FROM productos ORDER BY nombre").fetchall()
-        if prods:
-            opts = {f"{p['categoria']} - {p['nombre']}": p["id"] for p in prods}
-            sel = st.selectbox("Producto", list(opts.keys()))
-            if st.button("🗑️ ELIMINAR"):
-                conn.execute("DELETE FROM productos WHERE id=?", (opts[sel],))
-                conn.commit()
-                st.success("Eliminado")
-                st.rerun()
+    # ----- COMPRAS -----
+    elif menu == "📥 Compras":
+        st.markdown("### 📥 Registrar compra")
+        st.info("Al guardar, el precio de venta se actualiza con **+30% de margen**.")
 
-    # ----- COMPRAR -----
-    elif menu == "📥 Comprar":
-        st.header("📥 Compra de Mercadería")
-        st.info("Al finalizar, el precio de venta se actualiza con **margen del 30%**.")
         if "carrito_c" not in st.session_state:
             st.session_state.carrito_c = []
 
-        prods = conn.execute("SELECT * FROM productos ORDER BY categoria, nombre").fetchall()
+        prods = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
         proveeds = conn.execute("SELECT * FROM proveedores ORDER BY nombre").fetchall()
 
         col1, col2 = st.columns([2, 1])
         with col1:
-            opts = {f"{p['categoria']} | {p['nombre']} | Stock: {p['stock']:.1f}": p for p in prods}
-            sel = st.selectbox("Producto", list(opts.keys()), key="cp")
+            opts = {f"{p['nombre']} (stock {p['stock']:.1f})": p for p in prods}
+            sel = st.selectbox("Producto", list(opts.keys()))
             prov_opts = {"Sin proveedor": None}
             prov_opts.update({p["nombre"]: p["id"] for p in proveeds})
             prov = st.selectbox("Proveedor", list(prov_opts.keys()))
-            cant = st.number_input("Cantidad (kg)", min_value=0.1, step=0.5, value=5.0, key="cc")
-            precio = st.number_input("Precio compra $/kg", min_value=0, step=50, key="cpr")
+            cant = st.number_input("Kilos que entran", min_value=0.1, step=0.5, value=5.0)
+            precio = st.number_input("Precio compra $/kg", min_value=0, step=50)
             if precio > 0:
-                st.success(f"💡 Precio venta → **${round(precio*1.30):,.0f}/kg**")
+                st.success(f"Precio venta quedará en **${round(precio*1.3):,.0f}/kg**")
 
-            if st.button("➕ AGREGAR", use_container_width=True):
+            if st.button("➕ Agregar", use_container_width=True):
                 p = opts[sel]
-                pv = round(precio * 1.30) if precio > 0 else p["precio"]
-                found = False
-                for item in st.session_state.carrito_c:
-                    if item["id"] == p["id"]:
-                        item["cantidad"] += cant
-                        item["precio"] = precio
-                        item["subtotal"] = item["cantidad"] * precio
-                        item["pv"] = pv
-                        found = True
-                        break
-                if not found:
-                    st.session_state.carrito_c.append({
-                        "id": p["id"], "nombre": p["nombre"], "cantidad": cant,
-                        "precio": precio, "subtotal": cant * precio, "pv": pv,
-                        "prov": prov_opts[prov]
-                    })
-                st.success("Agregado")
+                pv = round(precio * 1.3) if precio > 0 else p["precio"]
+                st.session_state.carrito_c.append({
+                    "id": p["id"], "nombre": p["nombre"], "cantidad": cant,
+                    "precio": precio, "subtotal": cant * precio, "pv": pv,
+                    "prov": prov_opts[prov]
+                })
                 st.rerun()
 
         with col2:
-            st.subheader("🛒 Carrito")
+            st.markdown("#### Carrito")
             if not st.session_state.carrito_c:
                 st.info("Vacío")
             else:
-                total = 0
+                total = sum(i["subtotal"] for i in st.session_state.carrito_c)
                 for i, item in enumerate(st.session_state.carrito_c):
-                    st.write(f"**{item['nombre']}** — {item['cantidad']:.1f} kg")
+                    st.write(f"**{item['nombre']}** {item['cantidad']:.1f} kg")
                     if st.button("❌", key=f"qc{i}"):
                         st.session_state.carrito_c.pop(i)
                         st.rerun()
-                    total += item["subtotal"]
-                st.markdown(f"### TOTAL: ${total:,.0f}")
-                if st.button("✅ FINALIZAR COMPRA", use_container_width=True):
+                st.markdown(f"**Total: ${total:,.0f}**")
+                if st.button("✅ Guardar compra", use_container_width=True):
                     fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
                     for item in st.session_state.carrito_c:
                         conn.execute(
@@ -454,36 +466,39 @@ elif st.session_state.modo == "caja":
                         )
                     conn.commit()
                     st.session_state.carrito_c = []
-                    st.success("Compra registrada")
+                    st.success("Compra guardada")
                     st.rerun()
 
     # ----- PEDIDOS -----
     elif menu == "📋 Pedidos":
-        st.header("📋 Pedidos Sugeridos (30 días)")
+        st.markdown("### 📋 Qué conviene pedir")
+        st.caption("Basado en ventas de los últimos 30 días")
         df = pd.read_sql("""
             SELECT p.categoria, p.nombre, p.stock, p.minimo,
-                   COALESCE(SUM(v.cantidad),0) as vendido_30d
+                   COALESCE(SUM(v.cantidad),0) as vendido
             FROM productos p
             LEFT JOIN ventas v ON p.id=v.producto_id AND v.fecha >= date('now','-30 days')
             GROUP BY p.id
         """, conn)
-        df["proyeccion"] = df["vendido_30d"].round(1)
-        df["sugerido"] = (df["proyeccion"] + df["minimo"] - df["stock"]).clip(lower=0).round(1)
+        df["sugerido"] = (df["vendido"] + df["minimo"] - df["stock"]).clip(lower=0).round(1)
         necesita = df[df["sugerido"] > 0].sort_values("sugerido", ascending=False)
         if necesita.empty:
-            st.success("✅ No hay que pedir")
+            st.success("✅ No hay que pedir nada por ahora")
         else:
             st.dataframe(
-                necesita[["categoria", "nombre", "stock", "vendido_30d", "proyeccion", "sugerido"]],
+                necesita[["categoria", "nombre", "stock", "vendido", "sugerido"]].rename(columns={
+                    "categoria": "Categoría", "nombre": "Producto",
+                    "stock": "Stock", "vendido": "Vendió 30d", "sugerido": "Pedir (kg)"
+                }),
                 use_container_width=True, hide_index=True
             )
-            st.metric("Total kg sugeridos", f"{necesita['sugerido'].sum():.1f}")
+            st.metric("Total a pedir", f"{necesita['sugerido'].sum():.1f} kg")
 
     # ----- PRECIOS -----
     elif menu == "💡 Precios":
-        st.header("💡 Sugerencias de Precios (30 días)")
+        st.markdown("### 💡 Ajustes de precio sugeridos")
         df = pd.read_sql("""
-            SELECT p.id, p.nombre, p.categoria, p.precio, p.stock, p.minimo,
+            SELECT p.id, p.nombre, p.precio, p.stock, p.minimo,
                    COALESCE(SUM(v.cantidad),0) as vend
             FROM productos p
             LEFT JOIN ventas v ON p.id=v.producto_id AND v.fecha >= date('now','-30 days')
@@ -493,29 +508,29 @@ elif st.session_state.modo == "caja":
         for _, r in df.iterrows():
             dias = r["stock"] / (r["vend"] / 30) if r["vend"] > 0 else 999
             if dias > 45 or r["stock"] > r["minimo"] * 3:
-                sug, acc = round(r["precio"] * 0.90), "Bajar -10%"
+                sug, acc = round(r["precio"] * 0.90), "Bajar 10%"
             elif dias > 30:
-                sug, acc = round(r["precio"] * 0.95), "Bajar -5%"
+                sug, acc = round(r["precio"] * 0.95), "Bajar 5%"
             elif dias < 10 and r["stock"] <= r["minimo"]:
-                sug, acc = round(r["precio"] * 1.05), "Subir +5%"
+                sug, acc = round(r["precio"] * 1.05), "Subir 5%"
             else:
                 continue
             hay = True
             col1, col2 = st.columns([4, 1])
             with col1:
-                st.write(f"**{r['nombre']}** — ${r['precio']:,.0f} → **${sug:,.0f}** ({acc})")
+                st.write(f"**{r['nombre']}**  ${r['precio']:,.0f} → **${sug:,.0f}** ({acc})")
             with col2:
-                if st.button("✅", key=f"ap{r['id']}"):
+                if st.button("Aplicar", key=f"ap{r['id']}"):
                     conn.execute("UPDATE productos SET precio=? WHERE id=?", (sug, int(r["id"])))
                     conn.commit()
                     st.rerun()
         if not hay:
-            st.success("Sin cambios sugeridos")
+            st.success("No hay cambios recomendados")
 
     # ----- PROVEEDORES -----
     elif menu == "🚚 Proveedores":
-        st.header("🚚 Proveedores")
-        with st.expander("➕ Nuevo"):
+        st.markdown("### 🚚 Proveedores")
+        with st.expander("➕ Nuevo proveedor"):
             with st.form("npv"):
                 n = st.text_input("Nombre")
                 t = st.text_input("Teléfono")
@@ -524,55 +539,49 @@ elif st.session_state.modo == "caja":
                     conn.execute("INSERT INTO proveedores (nombre,telefono,notas) VALUES (?,?,?)", (n, t, no))
                     conn.commit()
                     st.rerun()
-        st.dataframe(pd.read_sql("SELECT nombre, telefono, notas FROM proveedores", conn),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.read_sql("SELECT nombre, telefono, notas FROM proveedores", conn),
+            use_container_width=True, hide_index=True
+        )
 
     # ----- CIERRE -----
     elif menu == "🧾 Cierre de Caja":
-        st.header("🧾 Cierre de Caja")
+        st.markdown("### 🧾 Cierre de caja")
         hoy = datetime.now().strftime("%Y-%m-%d")
         total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Ventas hoy", f"${total:,.0f}")
-        c2.metric("Kilos", f"{kilos:.1f}")
-        c3.metric("Nº ventas", num)
-        notas = st.text_input("Notas")
-        if st.button("💾 GUARDAR CIERRE", use_container_width=True):
-            conn.execute("DELETE FROM cierres WHERE fecha=?", (hoy,))
-            conn.execute("INSERT INTO cierres (fecha,total,kilos,num,notas) VALUES (?,?,?,?,?)",
-                         (hoy, total, kilos, num, notas))
-            conn.commit()
-            st.success("Guardado")
-        st.dataframe(pd.read_sql("SELECT * FROM cierres ORDER BY fecha DESC LIMIT 10", conn),
-                     use_container_width=True, hide_index=True)
 
-    # ----- SIMULADOR -----
-    elif menu == "🧮 Simulador":
-        st.header("🧮 Simulador")
-        prods = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
-        opts = {p["nombre"]: p for p in prods}
-        sel = st.selectbox("Producto", list(opts.keys()))
-        p = opts[sel]
-        nuevo = st.number_input("Nuevo precio", min_value=0, value=int(p["precio"]), step=50)
-        extra = st.number_input("Kg extras en 30 días", min_value=0.0, step=1.0)
-        vend30 = conn.execute(
-            "SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE producto_id=? AND fecha >= date('now','-30 days')",
-            (p["id"],)
-        ).fetchone()[0]
-        dif = (vend30 + extra) * nuevo - vend30 * p["precio"]
-        st.write(f"Venta 30 días: **{vend30:.1f} kg**")
-        st.write(f"Diferencia estimada: **{'+' if dif>=0 else ''}{dif:,.0f}**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ventas", f"${total:,.0f}")
+        c2.metric("Kilos", f"{kilos:.1f}")
+        c3.metric("Tickets", num)
+
+        notas = st.text_input("Notas del día (opcional)")
+        if st.button("💾 Guardar cierre", use_container_width=True):
+            conn.execute("DELETE FROM cierres WHERE fecha=?", (hoy,))
+            conn.execute(
+                "INSERT INTO cierres (fecha,total,kilos,num,notas) VALUES (?,?,?,?,?)",
+                (hoy, total, kilos, num, notas)
+            )
+            conn.commit()
+            st.success("Cierre guardado")
+
+        st.markdown("#### Historial")
+        st.dataframe(
+            pd.read_sql("SELECT fecha, total, kilos, num, notas FROM cierres ORDER BY fecha DESC LIMIT 10", conn),
+            use_container_width=True, hide_index=True
+        )
 
     # ----- ANÁLISIS -----
     elif menu == "📊 Análisis":
-        st.header("📊 Análisis (30 días)")
+        st.markdown("### 📊 Análisis últimos 30 días")
         tV = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE fecha >= date('now','-30 days')").fetchone()[0]
         kV = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE fecha >= date('now','-30 days')").fetchone()[0]
         c1, c2 = st.columns(2)
-        c1.metric("Ventas 30 días", f"${tV:,.0f}")
+        c1.metric("Ventas", f"${tV:,.0f}")
         c2.metric("Kilos", f"{kV:.1f}")
+
         top = pd.read_sql("""
             SELECT p.nombre, ROUND(SUM(v.cantidad),1) as kg
             FROM ventas v JOIN productos p ON v.producto_id=p.id
@@ -580,14 +589,9 @@ elif st.session_state.modo == "caja":
             GROUP BY v.producto_id ORDER BY kg DESC LIMIT 8
         """, conn)
         if not top.empty:
+            st.markdown("#### Más vendidos")
             st.bar_chart(top.set_index("nombre"))
-
-    # ----- COMPARATIVO -----
-    elif menu == "📈 Comparativo":
-        st.header("📈 Comparativo")
-        esta = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE fecha >= date('now','-7 days')").fetchone()[0]
-        ant = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE fecha >= date('now','-14 days') AND fecha < date('now','-7 days')").fetchone()[0]
-        st.write(f"Últimos 7 días: **${esta:,.0f}**")
-        st.write(f"7 días anteriores: **${ant:,.0f}**")
+        else:
+            st.info("Aún no hay ventas en los últimos 30 días")
 
 conn.close()
