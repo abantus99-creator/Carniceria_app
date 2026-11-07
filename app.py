@@ -1,14 +1,47 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+
+# ==================== FECHAS (hora de Chile) ====================
+try:
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo("America/Santiago")
+except Exception:
+    TZ = None
+
+
+def ahora():
+    return datetime.now(TZ) if TZ else datetime.now()
+
+
+def hoy_str():
+    return ahora().strftime("%Y-%m-%d")
+
+
+def hace(dias):
+    """Fecha (YYYY-MM-DD) de hace N días."""
+    return (ahora() - timedelta(days=dias)).strftime("%Y-%m-%d")
+
+
+def plata(x):
+    try:
+        return f"${x:,.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+CATEGORIAS = ["Pollo", "Vacuno", "Cerdo", "Otros"]
+ICONOS = {"Vacuno": "🥩", "Cerdo": "🐷", "Pollo": "🐔", "Otros": "📦"}
+
 
 # ==================== BASE DE DATOS ====================
 def get_db():
     conn = sqlite3.connect("carniceria.db")
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init():
     conn = get_db()
@@ -24,11 +57,7 @@ def init():
 
     c.execute("""CREATE TABLE IF NOT EXISTS compras (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, cantidad REAL, precio REAL, fecha TEXT, proveedor_id INTEGER)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS proveedores (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT, telefono TEXT, notas TEXT)""")
+        producto_id INTEGER, cantidad REAL, precio REAL, fecha TEXT)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS cierres (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,8 +67,13 @@ def init():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         items TEXT, total REAL, fecha TEXT, estado TEXT DEFAULT 'pendiente')""")
 
+    c.execute("""CREATE TABLE IF NOT EXISTS cambios_precio (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        producto_id INTEGER, precio_anterior REAL, precio_nuevo REAL,
+        fecha TEXT, motivo TEXT)""")
+
     try:
-        c.execute("ALTER TABLE compras ADD COLUMN proveedor_id INTEGER")
+        c.execute("ALTER TABLE pendientes ADD COLUMN fecha_cobro TEXT")
     except Exception:
         pass
 
@@ -64,18 +98,61 @@ def init():
             datos
         )
 
-    if c.execute("SELECT COUNT(*) FROM proveedores").fetchone()[0] == 0:
-        c.executemany(
-            "INSERT INTO proveedores (nombre, telefono, notas) VALUES (?,?,?)",
-            [
-                ("Frigorífico Central", "912345678", "Vacuno fijo"),
-                ("Carnes del Sur", "987654321", "Cerdo principal"),
-                ("Avícola Los Andes", "945678123", "Pollo"),
-            ]
-        )
-
     conn.commit()
     conn.close()
+
+
+# ==================== ESTADÍSTICAS ====================
+def costos_ultimos(conn):
+    """Último precio de compra registrado por producto."""
+    df = pd.read_sql("""
+        SELECT c.producto_id AS id, c.precio AS costo
+        FROM compras c
+        WHERE c.precio > 0
+          AND c.id = (SELECT MAX(c2.id) FROM compras c2
+                      WHERE c2.producto_id = c.producto_id AND c2.precio > 0)
+    """, conn)
+    return dict(zip(df["id"], df["costo"]))
+
+
+def dias_historial(conn):
+    """Cuántos días de ventas hay (máx 30), para no subestimar si la app es nueva."""
+    r = conn.execute("SELECT MIN(fecha) FROM ventas").fetchone()[0]
+    if not r:
+        return 30
+    try:
+        primera = datetime.strptime(r[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return 30
+    return max(1, min(30, (ahora().date() - primera).days + 1))
+
+
+def estadisticas_productos(conn):
+    df = pd.read_sql("""
+        SELECT p.id, p.nombre, p.categoria, p.precio, p.stock, p.minimo,
+            COALESCE(SUM(CASE WHEN v.fecha >= ? THEN v.cantidad END), 0) AS kg30,
+            COALESCE(SUM(CASE WHEN v.fecha >= ? THEN v.cantidad END), 0) AS kg7,
+            COALESCE(SUM(CASE WHEN v.fecha >= ? AND v.fecha < ? THEN v.cantidad END), 0) AS kg7ant,
+            MAX(v.fecha) AS ultima_venta
+        FROM productos p
+        LEFT JOIN ventas v ON v.producto_id = p.id
+        GROUP BY p.id
+    """, conn, params=(hace(29), hace(6), hace(13), hace(6)))
+    dh = dias_historial(conn)
+    df["prom_dia"] = df["kg30"] / dh
+    df["dias_stock"] = df["stock"] / df["prom_dia"].where(df["prom_dia"] > 0)
+    df["tendencia"] = (df["kg7"] - df["kg7ant"]) / df["kg7ant"].where(df["kg7ant"] > 0) * 100
+    df["costo"] = df["id"].map(costos_ultimos(conn))
+    return df, dh
+
+
+def txt_dias(d):
+    return "sin ventas" if pd.isna(d) else f"{d:.0f}"
+
+
+def txt_tend(t):
+    return "—" if pd.isna(t) else f"{t:+.0f}%"
+
 
 # ==================== ESTILOS ====================
 st.set_page_config(page_title="Carnicería", page_icon="🥩", layout="wide")
@@ -123,6 +200,56 @@ div[data-testid="column"] .stButton > button {
     padding: 16px;
     margin-bottom: 12px;
     border-left: 5px solid #27ae60;
+    color: #222;
+}
+
+/* ---------- TECLADO NUMÉRICO COMPACTO ---------- */
+.st-key-teclado {
+    max-width: 280px;
+    margin: 0 auto;
+    gap: 0.45rem !important;
+}
+.st-key-teclado [data-testid="stVerticalBlock"] {
+    gap: 0.45rem !important;
+}
+.st-key-teclado [data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+    gap: 0.45rem !important;
+}
+.st-key-teclado [data-testid="stColumn"],
+.st-key-teclado [data-testid="column"] {
+    min-width: 0 !important;
+    width: auto !important;
+    flex: 1 1 0 !important;
+}
+div.st-key-teclado .stButton > button,
+div.st-key-teclado div[data-testid="stColumn"] .stButton > button,
+div.st-key-teclado div[data-testid="column"] .stButton > button {
+    height: 48px !important;
+    min-height: 48px !important;
+    padding: 0 !important;
+    font-size: 22px !important;
+    font-weight: 600 !important;
+    border-radius: 12px !important;
+    background: #ffffff !important;
+    color: #222 !important;
+    border: 1px solid #d5d8dc !important;
+    box-shadow: none !important;
+}
+div.st-key-teclado .stButton > button:hover,
+div.st-key-teclado div[data-testid="stColumn"] .stButton > button:hover {
+    background: #eef1f3 !important;
+    transform: none !important;
+}
+.kg-display {
+    text-align: center;
+    font-size: 2rem;
+    font-weight: 800;
+    color: #27ae60;
+    border: 2px solid #27ae60;
+    border-radius: 12px;
+    padding: 6px 0;
+    margin-bottom: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -139,21 +266,21 @@ if st.session_state.modo is None:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔪  CARNICERO\n\nArmar pedidos", use_container_width=True):
+        if st.button("🔪  CARNICERO\n\nArmar pedidos", width="stretch"):
             st.session_state.modo = "carnicero"
             st.session_state.ticket = []
             st.session_state.cantidad_str = ""
             st.session_state.prod_sel = None
             st.rerun()
     with col2:
-        if st.button("💵  CAJA\n\nCobrar y gestionar", use_container_width=True):
+        if st.button("💵  CAJA\n\nCobrar y gestionar", width="stretch"):
             st.session_state.modo = "caja"
             st.rerun()
     st.stop()
 
 # Botón cambiar modo
 st.sidebar.markdown("### 🔄 Cambiar modo")
-if st.sidebar.button("Volver al inicio", use_container_width=True):
+if st.sidebar.button("Volver al inicio", width="stretch"):
     st.session_state.modo = None
     st.rerun()
 
@@ -189,7 +316,7 @@ if st.session_state.modo == "carnicero":
             with cols[i % 4]:
                 activo = st.session_state.prod_sel and st.session_state.prod_sel["id"] == p["id"]
                 label = f"{'✅ ' if activo else ''}{p['nombre']}\n${p['precio']:,.0f}"
-                if st.button(label, key=f"p{p['id']}", use_container_width=True):
+                if st.button(label, key=f"p{p['id']}", width="stretch"):
                     st.session_state.prod_sel = dict(p)
                     st.session_state.cantidad_str = ""
                     st.rerun()
@@ -204,22 +331,34 @@ if st.session_state.modo == "carnicero":
         st.warning("Primero elige un producto arriba")
 
     cantidad_mostrar = st.session_state.cantidad_str or "0"
-    st.markdown(f"<div class='big-total'>{cantidad_mostrar} kg</div>", unsafe_allow_html=True)
 
-    # Teclado
-    teclas = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "⌫"]]
-    for fila in teclas:
-        cols = st.columns(3)
-        for i, t in enumerate(fila):
-            with cols[i]:
-                if st.button(t, key=f"k{t}", use_container_width=True):
-                    if t == "⌫":
-                        st.session_state.cantidad_str = st.session_state.cantidad_str[:-1]
-                    else:
-                        st.session_state.cantidad_str += t
-                    st.rerun()
+    # Teclado numérico compacto (tipo teléfono)
+    with st.container(key="teclado"):
+        st.markdown(f"<div class='kg-display'>{cantidad_mostrar} kg</div>", unsafe_allow_html=True)
+        teclas = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "⌫"]]
+        for fila in teclas:
+            cols = st.columns(3, gap="small")
+            for i, t in enumerate(fila):
+                with cols[i]:
+                    if st.button(t, key=f"k{t}", width="stretch"):
+                        actual = st.session_state.cantidad_str
+                        if t == "⌫":
+                            st.session_state.cantidad_str = actual[:-1]
+                        elif t == "." and "." in actual:
+                            pass
+                        elif len(actual) < 6:
+                            st.session_state.cantidad_str = ("0." if (t == "." and not actual) else actual + t)
+                        st.rerun()
 
-    if st.button("➕  AGREGAR AL TICKET", use_container_width=True):
+    # Vista previa del subtotal
+    if st.session_state.prod_sel and st.session_state.cantidad_str:
+        try:
+            prev = float(st.session_state.cantidad_str) * st.session_state.prod_sel["precio"]
+            st.caption(f"Subtotal: **{plata(prev)}**")
+        except ValueError:
+            pass
+
+    if st.button("➕  AGREGAR AL TICKET", width="stretch"):
         if not st.session_state.prod_sel:
             st.error("Elige un producto")
         elif not st.session_state.cantidad_str:
@@ -269,8 +408,8 @@ if st.session_state.modo == "carnicero":
 
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("📤  ENVIAR A CAJA", use_container_width=True):
-                fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+            if st.button("📤  ENVIAR A CAJA", width="stretch"):
+                fecha = ahora().strftime("%Y-%m-%d %H:%M")
                 conn.execute(
                     "INSERT INTO pendientes (items, total, fecha, estado) VALUES (?,?,?,?)",
                     (json.dumps(st.session_state.ticket), total, fecha, "pendiente")
@@ -281,7 +420,7 @@ if st.session_state.modo == "carnicero":
                 st.balloons()
                 st.rerun()
         with col_b:
-            if st.button("🗑️  Cancelar", use_container_width=True):
+            if st.button("🗑️  Cancelar", width="stretch"):
                 st.session_state.ticket = []
                 st.rerun()
 
@@ -298,7 +437,6 @@ elif st.session_state.modo == "caja":
         "📥 Compras",
         "📋 Pedidos",
         "💡 Precios",
-        "🚚 Proveedores",
         "🧾 Cierre de Caja",
         "📊 Análisis"
     ], label_visibility="collapsed")
@@ -328,7 +466,8 @@ elif st.session_state.modo == "caja":
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button(f"✅  COBRAR  ${pend['total']:,.0f}", key=f"cob{pend['id']}", use_container_width=True):
+                    if st.button(f"✅  COBRAR  ${pend['total']:,.0f}", key=f"cob{pend['id']}", width="stretch"):
+                        fecha_cobro = ahora().strftime("%Y-%m-%d %H:%M")
                         for it in items:
                             conn.execute(
                                 "UPDATE productos SET stock = stock - ? WHERE id=?",
@@ -336,30 +475,53 @@ elif st.session_state.modo == "caja":
                             )
                             conn.execute(
                                 "INSERT INTO ventas (producto_id, cantidad, total, fecha) VALUES (?,?,?,?)",
-                                (it["id"], it["cantidad"], it["subtotal"], pend["fecha"])
+                                (it["id"], it["cantidad"], it["subtotal"], fecha_cobro)
                             )
                         conn.execute(
-                            "UPDATE pendientes SET estado='cobrado' WHERE id=?",
-                            (pend["id"],)
+                            "UPDATE pendientes SET estado='cobrado', fecha_cobro=? WHERE id=?",
+                            (fecha_cobro, pend["id"])
                         )
                         conn.commit()
                         st.success(f"Cobrado ${pend['total']:,.0f}")
                         st.rerun()
                 with col2:
-                    if st.button("❌  Anular", key=f"an{pend['id']}", use_container_width=True):
+                    if st.button("❌  Anular", key=f"an{pend['id']}", width="stretch"):
                         conn.execute(
-                            "UPDATE pendientes SET estado='anulado' WHERE id=?",
-                            (pend["id"],)
+                            "UPDATE pendientes SET estado='anulado', fecha_cobro=? WHERE id=?",
+                            (ahora().strftime("%Y-%m-%d %H:%M"), pend["id"])
                         )
                         conn.commit()
                         st.warning("Anulado")
                         st.rerun()
                 st.markdown("---")
 
+        # Historial últimas 5 compras de clientes
+        st.markdown("### 🕘 Últimas 5 compras")
+        ultimas = conn.execute("""
+            SELECT * FROM pendientes WHERE estado='cobrado'
+            ORDER BY COALESCE(fecha_cobro, fecha) DESC, id DESC LIMIT 5
+        """).fetchall()
+        if not ultimas:
+            st.info("Todavía no hay compras cobradas")
+        else:
+            for k, v in enumerate(ultimas):
+                items = json.loads(v["items"])
+                kg = sum(i["cantidad"] for i in items)
+                fecha = v["fecha_cobro"] or v["fecha"]
+                with st.expander(f"🧾 Ticket {v['id']} · {fecha} · {plata(v['total'])}", expanded=(k == 0)):
+                    det = pd.DataFrame([{
+                        "Producto": i["nombre"],
+                        "Kilos": f"{i['cantidad']:.2f}",
+                        "$/kg": plata(i["precio"]),
+                        "Subtotal": plata(i["subtotal"]),
+                    } for i in items])
+                    st.dataframe(det, width="stretch", hide_index=True)
+                    st.markdown(f"**Total: {plata(v['total'])}** · {kg:.2f} kg · {len(items)} producto(s)")
+
     # ----- RESUMEN -----
     elif menu == "🏠 Resumen":
         st.markdown("### 🏠 Resumen del día")
-        hoy = datetime.now().strftime("%Y-%m-%d")
+        hoy = hoy_str()
         total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
@@ -377,7 +539,7 @@ elif st.session_state.modo == "caja":
         if bajo > 0:
             st.error(f"**{bajo}** producto(s) con stock bajo")
             df = pd.read_sql("SELECT nombre, stock, minimo FROM productos WHERE stock <= minimo", conn)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
 
     # ----- PRODUCTOS -----
     elif menu == "📦 Productos":
@@ -390,7 +552,7 @@ elif st.session_state.modo == "caja":
             )
             if not df.empty:
                 st.markdown(f"#### {stickers[cat]}")
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width="stretch", hide_index=True)
 
         with st.expander("➕ Agregar producto"):
             with st.form("np"):
@@ -417,27 +579,23 @@ elif st.session_state.modo == "caja":
             st.session_state.carrito_c = []
 
         prods = conn.execute("SELECT * FROM productos ORDER BY nombre").fetchall()
-        proveeds = conn.execute("SELECT * FROM proveedores ORDER BY nombre").fetchall()
 
         col1, col2 = st.columns([2, 1])
         with col1:
             opts = {f"{p['nombre']} (stock {p['stock']:.1f})": p for p in prods}
             sel = st.selectbox("Producto", list(opts.keys()))
-            prov_opts = {"Sin proveedor": None}
-            prov_opts.update({p["nombre"]: p["id"] for p in proveeds})
-            prov = st.selectbox("Proveedor", list(prov_opts.keys()))
             cant = st.number_input("Kilos que entran", min_value=0.1, step=0.5, value=5.0)
             precio = st.number_input("Precio compra $/kg", min_value=0, step=50)
             if precio > 0:
                 st.success(f"Precio venta quedará en **${round(precio*1.3):,.0f}/kg**")
 
-            if st.button("➕ Agregar", use_container_width=True):
+            if st.button("➕ Agregar", width="stretch"):
                 p = opts[sel]
                 pv = round(precio * 1.3) if precio > 0 else p["precio"]
                 st.session_state.carrito_c.append({
                     "id": p["id"], "nombre": p["nombre"], "cantidad": cant,
                     "precio": precio, "subtotal": cant * precio, "pv": pv,
-                    "prov": prov_opts[prov]
+                    "precio_ant": p["precio"]
                 })
                 st.rerun()
 
@@ -453,17 +611,22 @@ elif st.session_state.modo == "caja":
                         st.session_state.carrito_c.pop(i)
                         st.rerun()
                 st.markdown(f"**Total: ${total:,.0f}**")
-                if st.button("✅ Guardar compra", use_container_width=True):
-                    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+                if st.button("✅ Guardar compra", width="stretch"):
+                    fecha = ahora().strftime("%Y-%m-%d %H:%M")
                     for item in st.session_state.carrito_c:
                         conn.execute(
                             "UPDATE productos SET stock=stock+?, precio=? WHERE id=?",
                             (item["cantidad"], item["pv"], item["id"])
                         )
                         conn.execute(
-                            "INSERT INTO compras (producto_id,cantidad,precio,fecha,proveedor_id) VALUES (?,?,?,?,?)",
-                            (item["id"], item["cantidad"], item["precio"], fecha, item["prov"])
+                            "INSERT INTO compras (producto_id,cantidad,precio,fecha) VALUES (?,?,?,?)",
+                            (item["id"], item["cantidad"], item["precio"], fecha)
                         )
+                        if item["pv"] != item.get("precio_ant"):
+                            conn.execute(
+                                "INSERT INTO cambios_precio (producto_id, precio_anterior, precio_nuevo, fecha, motivo) VALUES (?,?,?,?,?)",
+                                (item["id"], item.get("precio_ant"), item["pv"], fecha, "Compra (+30%)")
+                            )
                     conn.commit()
                     st.session_state.carrito_c = []
                     st.success("Compra guardada")
@@ -472,82 +635,220 @@ elif st.session_state.modo == "caja":
     # ----- PEDIDOS -----
     elif menu == "📋 Pedidos":
         st.markdown("### 📋 Qué conviene pedir")
-        st.caption("Basado en ventas de los últimos 30 días")
-        df = pd.read_sql("""
-            SELECT p.categoria, p.nombre, p.stock, p.minimo,
-                   COALESCE(SUM(v.cantidad),0) as vendido
-            FROM productos p
-            LEFT JOIN ventas v ON p.id=v.producto_id AND v.fecha >= date('now','-30 days')
-            GROUP BY p.id
-        """, conn)
-        df["sugerido"] = (df["vendido"] + df["minimo"] - df["stock"]).clip(lower=0).round(1)
-        necesita = df[df["sugerido"] > 0].sort_values("sugerido", ascending=False)
-        if necesita.empty:
-            st.success("✅ No hay que pedir nada por ahora")
-        else:
-            st.dataframe(
-                necesita[["categoria", "nombre", "stock", "vendido", "sugerido"]].rename(columns={
-                    "categoria": "Categoría", "nombre": "Producto",
-                    "stock": "Stock", "vendido": "Vendió 30d", "sugerido": "Pedir (kg)"
-                }),
-                use_container_width=True, hide_index=True
+        df, dh = estadisticas_productos(conn)
+
+        dias_cubrir = st.slider("¿Para cuántos días quieres que alcance el pedido?", 3, 21, 7)
+        st.caption(f"Basado en las ventas de los últimos {dh} días y la tendencia de la última semana.")
+
+        with st.expander("ℹ️ ¿Cómo se calcula?"):
+            st.markdown(
+                f"- **Vende kg/día**: kilos vendidos en los últimos {dh} días ÷ {dh}.\n"
+                "- **Días de stock**: stock actual ÷ venta diaria (cuántos días te alcanza).\n"
+                "- **Tendencia 7d**: kilos de esta semana vs la semana anterior. Si sube, se pide más; si baja, menos (tope −30% / +50%).\n"
+                f"- **Pedir kg** = venta diaria × {dias_cubrir} días × tendencia + mínimo − stock.\n"
+                "- 🔴 Urgente: bajo el mínimo o se acaba en ≤2 días · 🟡 Pronto: no alcanza para los días elegidos · 🟢 Normal: reposición."
             )
-            st.metric("Total a pedir", f"{necesita['sugerido'].sum():.1f} kg")
+
+        rango = {"🔴 Urgente": 0, "🟡 Pronto": 1, "🟢 Normal": 2}
+        total_kg, total_costo, algo = 0.0, 0.0, False
+
+        for cat in CATEGORIAS:
+            sub = df[df["categoria"] == cat]
+            if sub.empty:
+                continue
+            st.markdown(f"#### {ICONOS[cat]} {cat}")
+
+            filas = []
+            for _, r in sub.iterrows():
+                t = r["tendencia"]
+                factor = 1 + max(-30, min(50, t)) / 100 if pd.notna(t) else 1
+                demanda = r["prom_dia"] * dias_cubrir * factor
+                pedir = round(max(0.0, demanda + r["minimo"] - r["stock"]), 1)
+                if pedir <= 0:
+                    continue
+
+                motivos = []
+                if r["stock"] <= 0:
+                    motivos.append("Sin stock")
+                elif r["stock"] <= r["minimo"]:
+                    motivos.append(f"Stock {r['stock']:.1f} kg bajo el mínimo ({r['minimo']:.1f} kg)")
+                if pd.notna(r["dias_stock"]) and r["dias_stock"] < dias_cubrir:
+                    motivos.append(f"Se acaba en ~{r['dias_stock']:.0f} días")
+                if pd.notna(t) and t >= 15:
+                    motivos.append(f"Ventas subiendo {t:+.0f}% esta semana")
+                elif pd.notna(t) and t <= -15:
+                    motivos.append(f"Ventas bajando {t:.0f}% (se pide menos)")
+                if r["prom_dia"] > 0:
+                    motivos.append(f"Vende {r['prom_dia']:.1f} kg/día")
+                else:
+                    motivos.append("Sin ventas recientes: solo repone el mínimo")
+
+                if r["stock"] <= r["minimo"] or (pd.notna(r["dias_stock"]) and r["dias_stock"] <= 2):
+                    prio = "🔴 Urgente"
+                elif pd.notna(r["dias_stock"]) and r["dias_stock"] < dias_cubrir:
+                    prio = "🟡 Pronto"
+                else:
+                    prio = "🟢 Normal"
+
+                costo = pedir * r["costo"] if pd.notna(r["costo"]) else None
+                filas.append({
+                    "Prioridad": prio,
+                    "Producto": r["nombre"],
+                    "Stock kg": round(r["stock"], 1),
+                    "Vende kg/día": round(r["prom_dia"], 1),
+                    "Días de stock": txt_dias(r["dias_stock"]),
+                    "Tendencia 7d": txt_tend(t),
+                    "Pedir kg": pedir,
+                    "Costo aprox.": plata(costo) if costo is not None else "—",
+                    "¿Por qué?": " · ".join(motivos),
+                    "_rank": rango[prio],
+                    "_costo": costo or 0,
+                })
+
+            if not filas:
+                st.success(f"Stock suficiente para los próximos {dias_cubrir} días")
+                continue
+
+            algo = True
+            tabla = pd.DataFrame(filas).sort_values(["_rank", "Pedir kg"], ascending=[True, False])
+            kg_cat = tabla["Pedir kg"].sum()
+            costo_cat = tabla["_costo"].sum()
+            total_kg += kg_cat
+            total_costo += costo_cat
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Kg a pedir", f"{kg_cat:.1f}")
+            c2.metric("Urgentes", int((tabla["_rank"] == 0).sum()))
+            c3.metric("Costo aprox.", plata(costo_cat) if costo_cat else "—")
+            st.dataframe(tabla.drop(columns=["_rank", "_costo"]), width="stretch", hide_index=True)
+
+        st.markdown("---")
+        if algo:
+            c1, c2 = st.columns(2)
+            c1.metric("📦 Total a pedir", f"{total_kg:.1f} kg")
+            c2.metric("💸 Costo total aprox.", plata(total_costo) if total_costo else "—")
+            st.caption("El costo se calcula con el último precio de compra registrado en 📥 Compras.")
+        else:
+            st.success("✅ No hay que pedir nada por ahora")
 
     # ----- PRECIOS -----
     elif menu == "💡 Precios":
-        st.markdown("### 💡 Ajustes de precio sugeridos")
-        df = pd.read_sql("""
-            SELECT p.id, p.nombre, p.precio, p.stock, p.minimo,
-                   COALESCE(SUM(v.cantidad),0) as vend
-            FROM productos p
-            LEFT JOIN ventas v ON p.id=v.producto_id AND v.fecha >= date('now','-30 days')
-            GROUP BY p.id
-        """, conn)
+        st.markdown("### 💡 Precios sugeridos")
+        st.caption("Solo se sugiere **bajar 5%** en productos que se están moviendo lento, para rotar el stock antes de que pierda calidad.")
+
+        df, dh = estadisticas_productos(conn)
+        ult = pd.read_sql(
+            "SELECT producto_id AS id, MAX(fecha) AS ult_cambio FROM cambios_precio GROUP BY producto_id", conn
+        )
+        df = df.merge(ult, on="id", how="left")
+
+        with st.expander("ℹ️ ¿Cuándo se sugiere bajar?"):
+            st.markdown(
+                f"- No tuvo ventas en los últimos {dh} días, **o**\n"
+                "- El stock alcanza para **más de 30 días** de venta, **o**\n"
+                "- El stock es **más de 3 veces el mínimo**, **o**\n"
+                "- Las ventas cayeron **20% o más** esta semana y hay más del doble del mínimo.\n\n"
+                "No se sugiere si el stock está bajo el mínimo, si el precio quedaría bajo el costo, "
+                "o si ya se bajó hace menos de 7 días (hay que esperar a ver el efecto)."
+            )
+
         hay = False
-        for _, r in df.iterrows():
-            dias = r["stock"] / (r["vend"] / 30) if r["vend"] > 0 else 999
-            if dias > 45 or r["stock"] > r["minimo"] * 3:
-                sug, acc = round(r["precio"] * 0.90), "Bajar 10%"
-            elif dias > 30:
-                sug, acc = round(r["precio"] * 0.95), "Bajar 5%"
-            elif dias < 10 and r["stock"] <= r["minimo"]:
-                sug, acc = round(r["precio"] * 1.05), "Subir 5%"
-            else:
+        for cat in CATEGORIAS:
+            sub = df[df["categoria"] == cat]
+            if sub.empty:
                 continue
+
+            filas = []
+            for _, r in sub.iterrows():
+                if r["stock"] <= r["minimo"] or r["stock"] <= 0:
+                    continue
+                motivos = []
+                if r["kg30"] == 0:
+                    motivos.append(f"Sin ventas en {dh} días")
+                elif pd.notna(r["dias_stock"]) and r["dias_stock"] > 30:
+                    motivos.append(f"El stock alcanza para {r['dias_stock']:.0f} días")
+                if r["minimo"] > 0 and r["stock"] > r["minimo"] * 3:
+                    motivos.append(f"Stock {r['stock'] / r['minimo']:.1f} veces el mínimo")
+                t = r["tendencia"]
+                if pd.notna(t) and t <= -20 and r["stock"] > r["minimo"] * 2:
+                    motivos.append(f"Ventas cayendo {t:.0f}% esta semana")
+                if not motivos:
+                    continue
+
+                sug = int(round(r["precio"] * 0.95, -1))
+                dias_desde = None
+                if pd.notna(r["ult_cambio"]):
+                    try:
+                        dias_desde = (ahora().date() - datetime.strptime(str(r["ult_cambio"])[:10], "%Y-%m-%d").date()).days
+                    except ValueError:
+                        dias_desde = None
+
+                if dias_desde is not None and dias_desde < 7:
+                    estado, ok = f"⏸️ Esperar (cambió hace {dias_desde} d)", False
+                elif pd.notna(r["costo"]) and sug <= r["costo"]:
+                    estado, ok = "⚠️ Quedaría bajo el costo", False
+                else:
+                    estado, ok = "✅ Conviene bajar", True
+
+                margen = f"{(sug - r['costo']) / sug * 100:.0f}%" if pd.notna(r["costo"]) and sug > 0 else "—"
+                filas.append({
+                    "Decisión": estado,
+                    "Producto": r["nombre"],
+                    "Precio actual": plata(r["precio"]),
+                    "Precio −5%": plata(sug),
+                    "Stock kg": round(r["stock"], 1),
+                    "Vende kg/día": round(r["prom_dia"], 1),
+                    "Días de stock": txt_dias(r["dias_stock"]),
+                    "Tendencia 7d": txt_tend(t),
+                    "Margen nuevo": margen,
+                    "¿Por qué?": " · ".join(motivos),
+                    "_id": int(r["id"]), "_ant": r["precio"], "_sug": sug, "_ok": ok,
+                })
+
+            st.markdown(f"#### {ICONOS[cat]} {cat}")
+            if not filas:
+                st.success("Precios OK, los productos se están vendiendo bien")
+                continue
+
             hay = True
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.write(f"**{r['nombre']}**  ${r['precio']:,.0f} → **${sug:,.0f}** ({acc})")
-            with col2:
-                if st.button("Aplicar", key=f"ap{r['id']}"):
-                    conn.execute("UPDATE productos SET precio=? WHERE id=?", (sug, int(r["id"])))
+            tabla = pd.DataFrame(filas)
+            st.dataframe(tabla.drop(columns=["_id", "_ant", "_sug", "_ok"]), width="stretch", hide_index=True)
+
+            opciones = {f"{f['Producto']} → {plata(f['_sug'])}": f for f in filas if f["_ok"]}
+            if opciones:
+                elegidos = st.multiselect("Aplicar baja de 5% a:", list(opciones), default=list(opciones), key=f"ms_{cat}")
+                if st.button(f"✅ Aplicar en {cat}", key=f"apl_{cat}", width="stretch") and elegidos:
+                    fecha = ahora().strftime("%Y-%m-%d %H:%M")
+                    for k in elegidos:
+                        f = opciones[k]
+                        conn.execute("UPDATE productos SET precio=? WHERE id=?", (f["_sug"], f["_id"]))
+                        conn.execute(
+                            "INSERT INTO cambios_precio (producto_id, precio_anterior, precio_nuevo, fecha, motivo) VALUES (?,?,?,?,?)",
+                            (f["_id"], f["_ant"], f["_sug"], fecha, f["¿Por qué?"])
+                        )
                     conn.commit()
+                    st.success("Precios actualizados")
                     st.rerun()
+
         if not hay:
             st.success("No hay cambios recomendados")
 
-    # ----- PROVEEDORES -----
-    elif menu == "🚚 Proveedores":
-        st.markdown("### 🚚 Proveedores")
-        with st.expander("➕ Nuevo proveedor"):
-            with st.form("npv"):
-                n = st.text_input("Nombre")
-                t = st.text_input("Teléfono")
-                no = st.text_input("Notas")
-                if st.form_submit_button("Guardar") and n.strip():
-                    conn.execute("INSERT INTO proveedores (nombre,telefono,notas) VALUES (?,?,?)", (n, t, no))
-                    conn.commit()
-                    st.rerun()
-        st.dataframe(
-            pd.read_sql("SELECT nombre, telefono, notas FROM proveedores", conn),
-            use_container_width=True, hide_index=True
-        )
+        with st.expander("🕘 Últimos cambios de precio"):
+            hist = pd.read_sql("""
+                SELECT cp.fecha AS Fecha, p.nombre AS Producto,
+                       cp.precio_anterior AS Antes, cp.precio_nuevo AS Ahora, cp.motivo AS Motivo
+                FROM cambios_precio cp JOIN productos p ON p.id = cp.producto_id
+                ORDER BY cp.id DESC LIMIT 10
+            """, conn)
+            if hist.empty:
+                st.info("Sin cambios registrados")
+            else:
+                st.dataframe(hist, width="stretch", hide_index=True)
 
     # ----- CIERRE -----
     elif menu == "🧾 Cierre de Caja":
         st.markdown("### 🧾 Cierre de caja")
-        hoy = datetime.now().strftime("%Y-%m-%d")
+        hoy = hoy_str()
         total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
         num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
@@ -558,7 +859,7 @@ elif st.session_state.modo == "caja":
         c3.metric("Tickets", num)
 
         notas = st.text_input("Notas del día (opcional)")
-        if st.button("💾 Guardar cierre", use_container_width=True):
+        if st.button("💾 Guardar cierre", width="stretch"):
             conn.execute("DELETE FROM cierres WHERE fecha=?", (hoy,))
             conn.execute(
                 "INSERT INTO cierres (fecha,total,kilos,num,notas) VALUES (?,?,?,?,?)",
@@ -570,28 +871,209 @@ elif st.session_state.modo == "caja":
         st.markdown("#### Historial")
         st.dataframe(
             pd.read_sql("SELECT fecha, total, kilos, num, notas FROM cierres ORDER BY fecha DESC LIMIT 10", conn),
-            use_container_width=True, hide_index=True
+            width="stretch", hide_index=True
         )
 
     # ----- ANÁLISIS -----
     elif menu == "📊 Análisis":
-        st.markdown("### 📊 Análisis últimos 30 días")
-        tV = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE fecha >= date('now','-30 days')").fetchone()[0]
-        kV = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE fecha >= date('now','-30 days')").fetchone()[0]
-        c1, c2 = st.columns(2)
-        c1.metric("Ventas", f"${tV:,.0f}")
-        c2.metric("Kilos", f"{kV:.1f}")
+        st.markdown("### 📊 Análisis del negocio")
+        periodos = {"Últimos 7 días": 7, "Últimos 30 días": 30, "Últimos 90 días": 90}
+        n = periodos[st.selectbox("Período", list(periodos), index=1)]
+        st.caption("Cada número se compara con el período anterior del mismo largo.")
 
-        top = pd.read_sql("""
-            SELECT p.nombre, ROUND(SUM(v.cantidad),1) as kg
-            FROM ventas v JOIN productos p ON v.producto_id=p.id
-            WHERE v.fecha >= date('now','-30 days')
-            GROUP BY v.producto_id ORDER BY kg DESC LIMIT 8
-        """, conn)
-        if not top.empty:
-            st.markdown("#### Más vendidos")
-            st.bar_chart(top.set_index("nombre"))
+        ini, ini_ant = hace(n - 1), hace(2 * n - 1)
+        corte = pd.Timestamp(ini)
+
+        ventas = pd.read_sql("""
+            SELECT v.fecha, v.cantidad, v.total, v.producto_id AS pid, p.nombre, p.categoria
+            FROM ventas v JOIN productos p ON p.id = v.producto_id
+            WHERE v.fecha >= ?
+        """, conn, params=(ini_ant,))
+        ventas["dt"] = pd.to_datetime(ventas["fecha"], errors="coerce")
+        ventas = ventas.dropna(subset=["dt"])
+        costos = costos_ultimos(conn)
+        ventas["costo"] = ventas["pid"].map(costos)
+        ventas["ganancia"] = ventas["total"] - ventas["cantidad"] * ventas["costo"]
+        act = ventas[ventas["dt"] >= corte].copy()
+        ant = ventas[ventas["dt"] < corte].copy()
+
+        tickets = pd.read_sql("""
+            SELECT estado, total, COALESCE(fecha_cobro, fecha) AS f FROM pendientes
+            WHERE estado IN ('cobrado','anulado') AND COALESCE(fecha_cobro, fecha) >= ?
+        """, conn, params=(ini_ant,))
+        tickets["dt"] = pd.to_datetime(tickets["f"], errors="coerce")
+        tk_act = tickets[(tickets["dt"] >= corte) & (tickets["estado"] == "cobrado")]
+        tk_ant = tickets[(tickets["dt"] < corte) & (tickets["estado"] == "cobrado")]
+        anulados = int(((tickets["dt"] >= corte) & (tickets["estado"] == "anulado")).sum())
+
+        inv, dh = estadisticas_productos(conn)
+
+        if act.empty:
+            st.info("Aún no hay ventas en este período")
         else:
-            st.info("Aún no hay ventas en los últimos 30 días")
+            def var(a, b):
+                return f"{(a - b) / b * 100:+.0f}%" if b else None
+
+            V, Va = act["total"].sum(), ant["total"].sum()
+            K, Ka = act["cantidad"].sum(), ant["cantidad"].sum()
+            T, Ta = len(tk_act), len(tk_ant)
+            prom = V / T if T else 0
+            prom_a = Va / Ta if Ta else 0
+            pkg = V / K if K else 0
+            pkg_a = Va / Ka if Ka else 0
+            con_costo = act["costo"].notna()
+            G = act.loc[con_costo, "ganancia"].sum()
+            base = act.loc[con_costo, "total"].sum()
+            margen = G / base * 100 if base else None
+
+            # --- Indicadores ---
+            r1 = st.columns(3)
+            r1[0].metric("💰 Ventas", plata(V), var(V, Va))
+            r1[1].metric("⚖️ Kilos", f"{K:.1f}", var(K, Ka))
+            r1[2].metric("🧾 Tickets", T, var(T, Ta))
+            r2 = st.columns(3)
+            r2[0].metric("🎯 Ticket promedio", plata(prom), var(prom, prom_a))
+            r2[1].metric("💲 Precio prom./kg", plata(pkg), var(pkg, pkg_a))
+            r2[2].metric("📈 Ganancia estimada", plata(G) if base else "—",
+                         f"margen {margen:.0f}%" if margen is not None else None, delta_color="off")
+            if base and base < V:
+                st.caption(f"Ganancia calculada sobre el {base / V * 100:.0f}% de las ventas "
+                           "(solo productos con precio de compra registrado).")
+
+            # --- Datos para gráficos y conclusiones ---
+            idx = pd.date_range(corte, pd.Timestamp(hoy_str()), freq="D")
+            por_dia = act.groupby(act["dt"].dt.normalize())["total"].sum().reindex(idx, fill_value=0)
+            nombres_dia = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            sem = por_dia.groupby(por_dia.index.dayofweek).mean()
+            horas = act.groupby(act["dt"].dt.hour)["total"].sum()
+
+            prod = (act.groupby(["nombre", "categoria"])
+                    .agg(ventas=("total", "sum"), kilos=("cantidad", "sum"))
+                    .reset_index().sort_values("ventas", ascending=False))
+            prod_ant = ant.groupby("nombre")["total"].sum()
+            gp = act[con_costo].groupby("nombre").agg(g=("ganancia", "sum"), b=("total", "sum"))
+
+            cat_act = act.groupby("categoria").agg(ventas=("total", "sum"), kilos=("cantidad", "sum"))
+            cat_ant = ant.groupby("categoria")["total"].sum()
+            gc = act[con_costo].groupby("categoria").agg(g=("ganancia", "sum"), b=("total", "sum"))
+
+            vendidos = set(act["pid"])
+            sin_mov = inv[(~inv["id"].isin(vendidos)) & (inv["stock"] > 0)]
+            bajo = inv[inv["stock"] <= inv["minimo"]]
+
+            # --- Conclusiones ---
+            st.markdown("#### 🧠 Conclusiones para decidir")
+            ideas = []
+            if Va:
+                cambio = (V - Va) / Va * 100
+                ideas.append(f"Las ventas {'subieron' if cambio >= 0 else 'bajaron'} **{abs(cambio):.0f}%** frente al período anterior.")
+            if sem.max() > 0:
+                mejor, peor = int(sem.idxmax()), int(sem.idxmin())
+                ideas.append(f"Tu mejor día es el **{nombres_dia[mejor]}** (promedio {plata(sem.max())}) y el más flojo el "
+                             f"**{nombres_dia[peor]}** ({plata(sem.min())}). Ten más stock y apoyo el {nombres_dia[mejor].lower()}; "
+                             f"usa el {nombres_dia[peor].lower()} para ofertas.")
+            if not horas.empty:
+                h = int(horas.idxmax())
+                ideas.append(f"La hora de más venta es **{h:02d}:00–{h + 1:02d}:00** ({horas.max() / V * 100:.0f}% de las ventas).")
+            if not prod.empty:
+                top = prod.iloc[0]
+                top3 = prod.head(3)["ventas"].sum() / V * 100
+                ideas.append(f"El producto estrella es **{top['nombre']}** ({top['ventas'] / V * 100:.0f}% de las ventas). "
+                             f"Los 3 primeros suman el **{top3:.0f}%**: nunca deben faltar.")
+            if len(cat_act) and not cat_ant.empty:
+                crec = {c: (cat_act.loc[c, 'ventas'] - cat_ant.get(c, 0)) / cat_ant.get(c, 0) * 100
+                        for c in cat_act.index if cat_ant.get(c, 0) > 0}
+                if crec:
+                    cmax = max(crec, key=crec.get)
+                    cmin = min(crec, key=crec.get)
+                    if crec[cmax] > 0:
+                        ideas.append(f"**{cmax}** es la sección que más crece ({crec[cmax]:+.0f}%).")
+                    if crec[cmin] < 0:
+                        ideas.append(f"**{cmin}** es la sección que más cae ({crec[cmin]:+.0f}%): revisa precio y calidad.")
+            margen_bajo = gp[(gp["b"] > 0) & (gp["g"] / gp["b"] < 0.2)]
+            if not margen_bajo.empty:
+                ideas.append(f"Margen bajo (<20%) en: **{', '.join(margen_bajo.index)}**. Revisa costo o precio.")
+            if not sin_mov.empty:
+                plata_parada = (sin_mov["stock"] * sin_mov["precio"]).sum()
+                ideas.append(f"**{len(sin_mov)}** producto(s) sin ventas en el período, con {plata(plata_parada)} en stock parado → mira 💡 Precios.")
+            if not bajo.empty:
+                ideas.append(f"**{len(bajo)}** producto(s) bajo el stock mínimo → mira 📋 Pedidos.")
+            if anulados and (T + anulados):
+                ideas.append(f"Se anularon **{anulados}** ticket(s) ({anulados / (T + anulados) * 100:.0f}% del total).")
+            for i in ideas:
+                st.markdown(f"- {i}")
+
+            # --- Ventas por día ---
+            st.markdown("#### 📅 Ventas por día")
+            st.bar_chart(por_dia.to_frame("Ventas $"))
+            st.caption(f"Promedio diario: {plata(por_dia.mean())} · Mejor día: {plata(por_dia.max())}")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("#### 🗓️ Promedio por día de la semana")
+                sem_g = sem.copy()
+                sem_g.index = [f"{i + 1} {nombres_dia[i][:3]}" for i in sem_g.index]
+                st.bar_chart(sem_g.to_frame("Promedio $"))
+            with c2:
+                st.markdown("#### ⏰ Ventas por hora")
+                horas_g = horas.copy()
+                horas_g.index = [f"{h:02d}h" for h in horas_g.index]
+                st.bar_chart(horas_g.to_frame("Ventas $"))
+
+            # --- Por sección ---
+            st.markdown("#### 🥩🐷🐔 Por sección")
+            filas = []
+            for c in cat_act.sort_values("ventas", ascending=False).index:
+                v = cat_act.loc[c, "ventas"]
+                filas.append({
+                    "Sección": f"{ICONOS.get(c, '📦')} {c}",
+                    "Ventas": plata(v),
+                    "% del total": f"{v / V * 100:.0f}%",
+                    "Kilos": round(cat_act.loc[c, "kilos"], 1),
+                    "vs anterior": txt_tend((v - cat_ant.get(c, 0)) / cat_ant.get(c, 0) * 100) if cat_ant.get(c, 0) else "—",
+                    "Margen": f"{gc.loc[c, 'g'] / gc.loc[c, 'b'] * 100:.0f}%" if c in gc.index and gc.loc[c, "b"] else "—",
+                })
+            st.dataframe(pd.DataFrame(filas), width="stretch", hide_index=True)
+
+            # --- Productos ---
+            st.markdown("#### 🏆 Productos más vendidos")
+            st.bar_chart(prod.head(8).set_index("nombre")[["ventas"]].rename(columns={"ventas": "Ventas $"}))
+            filas = []
+            for _, r in prod.head(10).iterrows():
+                a = prod_ant.get(r["nombre"], 0)
+                filas.append({
+                    "Producto": r["nombre"],
+                    "Sección": r["categoria"],
+                    "Ventas": plata(r["ventas"]),
+                    "% del total": f"{r['ventas'] / V * 100:.0f}%",
+                    "Kilos": round(r["kilos"], 1),
+                    "vs anterior": txt_tend((r["ventas"] - a) / a * 100) if a else "nuevo",
+                    "Margen": f"{gp.loc[r['nombre'], 'g'] / gp.loc[r['nombre'], 'b'] * 100:.0f}%"
+                              if r["nombre"] in gp.index and gp.loc[r["nombre"], "b"] else "—",
+                })
+            st.dataframe(pd.DataFrame(filas), width="stretch", hide_index=True)
+
+        # --- Inventario ---
+        st.markdown("#### 📦 Inventario")
+        valor_venta = (inv["stock"].clip(lower=0) * inv["precio"]).sum()
+        valor_costo = (inv["stock"].clip(lower=0) * inv["costo"]).sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Stock a precio venta", plata(valor_venta))
+        c2.metric("Stock a costo", plata(valor_costo) if valor_costo else "—")
+        c3, c4 = st.columns(2)
+        c3.metric("Bajo el mínimo", int((inv["stock"] <= inv["minimo"]).sum()))
+        c4.metric("Sin ventas en el período", int(((~inv["id"].isin(set(act["pid"]))) & (inv["stock"] > 0)).sum()))
+
+        cobertura = inv[["categoria", "nombre", "stock", "prom_dia", "dias_stock"]].copy()
+        cobertura["Días de stock"] = cobertura["dias_stock"].apply(txt_dias)
+        cobertura = cobertura.sort_values("dias_stock", na_position="last")
+        st.dataframe(
+            cobertura.rename(columns={"categoria": "Sección", "nombre": "Producto", "stock": "Stock kg",
+                                      "prom_dia": "Vende kg/día"})
+                     .drop(columns=["dias_stock"])
+                     .round({"Stock kg": 1, "Vende kg/día": 1}),
+            width="stretch", hide_index=True
+        )
+        st.caption(f"Días de stock = cuántos días alcanza el stock al ritmo de venta de los últimos {dh} días.")
 
 conn.close()
