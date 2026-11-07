@@ -3,6 +3,8 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import json
+import os
+import threading
 
 # ==================== FECHAS (hora de Chile) ====================
 try:
@@ -37,47 +39,178 @@ ICONOS = {"Vacuno": "🥩", "Cerdo": "🐷", "Pollo": "🐔", "Otros": "📦"}
 
 
 # ==================== BASE DE DATOS ====================
+# Si en los Secrets de Streamlit existe DB_URL, todo se guarda en la nube
+# (Supabase / PostgreSQL). Si no existe, se usa el archivo local carniceria.db.
+TABLAS = {
+    "productos": "id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT, categoria TEXT, precio REAL, stock REAL, minimo REAL",
+    "ventas": "id INTEGER PRIMARY KEY AUTOINCREMENT, producto_id INTEGER, cantidad REAL, total REAL, fecha TEXT",
+    "compras": "id INTEGER PRIMARY KEY AUTOINCREMENT, producto_id INTEGER, cantidad REAL, precio REAL, fecha TEXT",
+    "cierres": "id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, total REAL, kilos REAL, num INTEGER, notas TEXT",
+    "pendientes": "id INTEGER PRIMARY KEY AUTOINCREMENT, items TEXT, total REAL, fecha TEXT, estado TEXT DEFAULT 'pendiente', fecha_cobro TEXT",
+    "cambios_precio": "id INTEGER PRIMARY KEY AUTOINCREMENT, producto_id INTEGER, precio_anterior REAL, precio_nuevo REAL, fecha TEXT, motivo TEXT",
+}
+
+
+def _db_url():
+    try:
+        url = st.secrets["DB_URL"]
+    except Exception:
+        url = os.environ.get("DB_URL")
+    return url.strip() if url else None
+
+
+class Fila(dict):
+    """Fila que se puede leer por nombre (fila['total']) o por posición (fila[0])."""
+    def __init__(self, cols, vals):
+        super().__init__(zip(cols, vals))
+        self._v = tuple(vals)
+
+    def __getitem__(self, k):
+        return self._v[k] if isinstance(k, int) else super().__getitem__(k)
+
+
+class Resultado:
+    def __init__(self, cur):
+        self.cols = [d[0] for d in cur.description] if cur.description else []
+        self.rows = cur.fetchall() if cur.description else []
+
+    def fetchone(self):
+        return Fila(self.cols, self.rows[0]) if self.rows else None
+
+    def fetchall(self):
+        return [Fila(self.cols, r) for r in self.rows]
+
+
+def _limpiar(params):
+    return tuple(p.item() if hasattr(p, "item") else p for p in params)
+
+
+class BD:
+    def __init__(self):
+        url = _db_url()
+        self.nube = bool(url)
+        self.lock = threading.Lock()
+        if self.nube:
+            import psycopg2
+            self.raw = psycopg2.connect(url, connect_timeout=15)
+            self.raw.autocommit = True
+        else:
+            self.raw = sqlite3.connect("carniceria.db", check_same_thread=False, isolation_level=None)
+
+    def _sql(self, sql):
+        if self.nube:
+            sql = (sql.replace("?", "%s")
+                      .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+                      .replace(" REAL", " DOUBLE PRECISION"))
+        return sql
+
+    def execute(self, sql, params=()):
+        with self.lock:
+            cur = self.raw.cursor()
+            try:
+                cur.execute(self._sql(sql), _limpiar(params))
+                return Resultado(cur)
+            finally:
+                cur.close()
+
+    def executemany(self, sql, filas):
+        filas = [_limpiar(f) for f in filas]
+        if not filas:
+            return
+        with self.lock:
+            cur = self.raw.cursor()
+            try:
+                cur.executemany(self._sql(sql), filas)
+            finally:
+                cur.close()
+
+    def df(self, sql, params=()):
+        r = self.execute(sql, params)
+        return pd.DataFrame(r.rows, columns=r.cols)
+
+    def vivo(self):
+        try:
+            self.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    def commit(self):
+        pass  # se guarda automáticamente
+
+    def close(self):
+        pass  # la conexión se reutiliza
+
+
+@st.cache_resource(show_spinner="Conectando a la base de datos…")
+def _conexion():
+    return BD()
+
+
 def get_db():
-    conn = sqlite3.connect("carniceria.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+    bd = _conexion()
+    if bd.nube and not bd.vivo():
+        _conexion.clear()
+        bd = _conexion()
+    return bd
 
 
+def leer(sql, conn, params=()):
+    return conn.df(sql, params)
+
+
+def _migrar_desde_archivo(conn):
+    """Si la nube está vacía y existe el archivo local antiguo, copia sus datos."""
+    if not os.path.exists("carniceria.db"):
+        return 0
+    if conn.execute("SELECT COUNT(*) FROM productos").fetchone()[0] > 0:
+        return 0
+    viejo = sqlite3.connect("carniceria.db")
+    copiadas = 0
+    try:
+        for tabla, definicion in TABLAS.items():
+            try:
+                cols_viejas = [r[1] for r in viejo.execute(f"PRAGMA table_info({tabla})")]
+            except Exception:
+                continue
+            cols = [c.split()[0] for c in definicion.split(", ") if c.split()[0] in cols_viejas]
+            if not cols:
+                continue
+            filas = viejo.execute(f"SELECT {', '.join(cols)} FROM {tabla}").fetchall()
+            if not filas:
+                continue
+            marcas = ",".join("?" * len(cols))
+            conn.executemany(f"INSERT INTO {tabla} ({', '.join(cols)}) VALUES ({marcas})", filas)
+            copiadas += len(filas)
+            if "id" in cols:
+                conn.execute(
+                    f"SELECT setval(pg_get_serial_sequence('{tabla}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {tabla}), 0) + 1, false)"
+                )
+    finally:
+        viejo.close()
+    return copiadas
+
+
+@st.cache_resource(show_spinner=False)
 def init():
     conn = get_db()
-    c = conn.cursor()
+    for tabla, definicion in TABLAS.items():
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {tabla} ({definicion})")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS productos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT, categoria TEXT, precio REAL, stock REAL, minimo REAL)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS ventas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, cantidad REAL, total REAL, fecha TEXT)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS compras (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, cantidad REAL, precio REAL, fecha TEXT)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS cierres (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT, total REAL, kilos REAL, num INTEGER, notas TEXT)""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS pendientes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        items TEXT, total REAL, fecha TEXT, estado TEXT DEFAULT 'pendiente')""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS cambios_precio (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        producto_id INTEGER, precio_anterior REAL, precio_nuevo REAL,
-        fecha TEXT, motivo TEXT)""")
-
+    # Bases antiguas que no tenían la columna fecha_cobro
     try:
-        c.execute("ALTER TABLE pendientes ADD COLUMN fecha_cobro TEXT")
+        conn.execute("ALTER TABLE pendientes ADD COLUMN fecha_cobro TEXT")
     except Exception:
         pass
 
-    if c.execute("SELECT COUNT(*) FROM productos").fetchone()[0] == 0:
+    if conn.nube:
+        try:
+            _migrar_desde_archivo(conn)
+        except Exception as e:
+            print("No se pudo migrar el archivo local:", e)
+
+    if conn.execute("SELECT COUNT(*) FROM productos").fetchone()[0] == 0:
         datos = [
             ("Lomo Vetado", "Vacuno", 12990, 15, 5),
             ("Asiento", "Vacuno", 8990, 20, 6),
@@ -93,19 +226,17 @@ def init():
             ("Pechuga", "Pollo", 4990, 15, 5),
             ("Ala", "Pollo", 2490, 12, 4),
         ]
-        c.executemany(
+        conn.executemany(
             "INSERT INTO productos (nombre, categoria, precio, stock, minimo) VALUES (?,?,?,?,?)",
             datos
         )
-
-    conn.commit()
-    conn.close()
+    return True
 
 
 # ==================== ESTADÍSTICAS ====================
 def costos_ultimos(conn):
     """Último precio de compra registrado por producto."""
-    df = pd.read_sql("""
+    df = leer("""
         SELECT c.producto_id AS id, c.precio AS costo
         FROM compras c
         WHERE c.precio > 0
@@ -128,7 +259,7 @@ def dias_historial(conn):
 
 
 def estadisticas_productos(conn):
-    df = pd.read_sql("""
+    df = leer("""
         SELECT p.id, p.nombre, p.categoria, p.precio, p.stock, p.minimo,
             COALESCE(SUM(CASE WHEN v.fecha >= ? THEN v.cantidad END), 0) AS kg30,
             COALESCE(SUM(CASE WHEN v.fecha >= ? THEN v.cantidad END), 0) AS kg7,
@@ -285,6 +416,10 @@ if st.sidebar.button("Volver al inicio", width="stretch"):
     st.rerun()
 
 conn = get_db()
+if conn.nube:
+    st.sidebar.success("☁️ Datos guardados en la nube")
+else:
+    st.sidebar.warning("⚠️ Guardando solo en este servidor (sin nube)")
 
 # ============================================================
 #                         CARNICERO
@@ -522,9 +657,9 @@ elif st.session_state.modo == "caja":
     elif menu == "🏠 Resumen":
         st.markdown("### 🏠 Resumen del día")
         hoy = hoy_str()
-        total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
+        total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
+        kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
+        num = conn.execute("SELECT COUNT(*) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
         pend = conn.execute("SELECT COUNT(*) FROM pendientes WHERE estado='pendiente'").fetchone()[0]
         bajo = conn.execute("SELECT COUNT(*) FROM productos WHERE stock <= minimo").fetchone()[0]
 
@@ -538,7 +673,7 @@ elif st.session_state.modo == "caja":
             st.warning(f"Hay **{pend}** ticket(s) esperando cobro → ve a **Cobrar**")
         if bajo > 0:
             st.error(f"**{bajo}** producto(s) con stock bajo")
-            df = pd.read_sql("SELECT nombre, stock, minimo FROM productos WHERE stock <= minimo", conn)
+            df = leer("SELECT nombre, stock, minimo FROM productos WHERE stock <= minimo", conn)
             st.dataframe(df, width="stretch", hide_index=True)
 
     # ----- PRODUCTOS -----
@@ -546,7 +681,7 @@ elif st.session_state.modo == "caja":
         st.markdown("### 📦 Productos")
         stickers = {"Vacuno": "🥩 VACUNO", "Cerdo": "🐷 CERDO", "Pollo": "🐔 POLLO", "Otros": "📦 OTROS"}
         for cat in ["Vacuno", "Cerdo", "Pollo", "Otros"]:
-            df = pd.read_sql(
+            df = leer(
                 "SELECT nombre, precio, stock, minimo FROM productos WHERE categoria=? ORDER BY nombre",
                 conn, params=(cat,)
             )
@@ -737,7 +872,7 @@ elif st.session_state.modo == "caja":
         st.caption("Solo se sugiere **bajar 5%** en productos que se están moviendo lento, para rotar el stock antes de que pierda calidad.")
 
         df, dh = estadisticas_productos(conn)
-        ult = pd.read_sql(
+        ult = leer(
             "SELECT producto_id AS id, MAX(fecha) AS ult_cambio FROM cambios_precio GROUP BY producto_id", conn
         )
         df = df.merge(ult, on="id", how="left")
@@ -834,9 +969,9 @@ elif st.session_state.modo == "caja":
             st.success("No hay cambios recomendados")
 
         with st.expander("🕘 Últimos cambios de precio"):
-            hist = pd.read_sql("""
-                SELECT cp.fecha AS Fecha, p.nombre AS Producto,
-                       cp.precio_anterior AS Antes, cp.precio_nuevo AS Ahora, cp.motivo AS Motivo
+            hist = leer("""
+                SELECT cp.fecha AS "Fecha", p.nombre AS "Producto",
+                       cp.precio_anterior AS "Antes", cp.precio_nuevo AS "Ahora", cp.motivo AS "Motivo"
                 FROM cambios_precio cp JOIN productos p ON p.id = cp.producto_id
                 ORDER BY cp.id DESC LIMIT 10
             """, conn)
@@ -849,9 +984,9 @@ elif st.session_state.modo == "caja":
     elif menu == "🧾 Cierre de Caja":
         st.markdown("### 🧾 Cierre de caja")
         hoy = hoy_str()
-        total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
-        num = conn.execute("SELECT COUNT(*) FROM ventas WHERE date(fecha)=?", (hoy,)).fetchone()[0]
+        total = conn.execute("SELECT COALESCE(SUM(total),0) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
+        kilos = conn.execute("SELECT COALESCE(SUM(cantidad),0) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
+        num = conn.execute("SELECT COUNT(*) FROM ventas WHERE substr(fecha, 1, 10)=?", (hoy,)).fetchone()[0]
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Ventas", f"${total:,.0f}")
@@ -870,7 +1005,7 @@ elif st.session_state.modo == "caja":
 
         st.markdown("#### Historial")
         st.dataframe(
-            pd.read_sql("SELECT fecha, total, kilos, num, notas FROM cierres ORDER BY fecha DESC LIMIT 10", conn),
+            leer("SELECT fecha, total, kilos, num, notas FROM cierres ORDER BY fecha DESC LIMIT 10", conn),
             width="stretch", hide_index=True
         )
 
@@ -884,7 +1019,7 @@ elif st.session_state.modo == "caja":
         ini, ini_ant = hace(n - 1), hace(2 * n - 1)
         corte = pd.Timestamp(ini)
 
-        ventas = pd.read_sql("""
+        ventas = leer("""
             SELECT v.fecha, v.cantidad, v.total, v.producto_id AS pid, p.nombre, p.categoria
             FROM ventas v JOIN productos p ON p.id = v.producto_id
             WHERE v.fecha >= ?
@@ -897,7 +1032,7 @@ elif st.session_state.modo == "caja":
         act = ventas[ventas["dt"] >= corte].copy()
         ant = ventas[ventas["dt"] < corte].copy()
 
-        tickets = pd.read_sql("""
+        tickets = leer("""
             SELECT estado, total, COALESCE(fecha_cobro, fecha) AS f FROM pendientes
             WHERE estado IN ('cobrado','anulado') AND COALESCE(fecha_cobro, fecha) >= ?
         """, conn, params=(ini_ant,))
